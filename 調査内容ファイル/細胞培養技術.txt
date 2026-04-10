@@ -1,0 +1,12 @@
+細胞培養技術（cell culture technology）に関する最新の記事・論文・プレスリリース。
+検索キーワード: cell culture, bioreactor, cell therapy manufacturing, single-use bioreactor, 3D cell culture, scaffold, suspension culture, cell culture media, GMP manufacturing, continuous bioprocessing
+対象トピック:
+① シングルユースバイオリアクターの最新技術（バッグ素材、センサー統合、スケールアップ）
+② 3D細胞培養技術の進展（スフェロイド、オルガノイド、足場材料、ハイドロゲル、マイクロキャリア）
+③ 細胞治療の商業化製造技術（自動培養、閉鎖系プロセス、クリーンルーム革新）
+④ 培地技術の革新（無血清培地、化学組成培地、培地リサイクル技術）
+⑤ 連続バイオプロセシング（灌流培養、インライン精製、PAT）
+⑥ 主要企業動向（Sartorius, Thermo Fisher, Cytiva, Merck, Eppendorf, Corning等）
+⑦ Organ-on-a-chip・マイクロ流体デバイスの培養応用
+⑧ 培養肉・細胞農業向けの大規模培養技術
+⑨ 品質管理の自動化（リアルタイムモニタリング、AI活用、プロセス分析）

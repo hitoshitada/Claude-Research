@@ -1,0 +1,12 @@
+# VoicePeak TTS設定
+exe_path: "C:\\Program Files\\VOICEPEAK\\voicepeak.exe"
+speed: 100
+max_chars: 140          # VoicePeak1回あたりの最大文字数
+max_retries: 3          # 失敗時リトライ回数
+retry_delay: 2.0        # リトライ間隔（秒）
+sentence_pause: 0.3     # 同一話者の文間の無音（秒）
+
+# 音声出力設定
+output:
+  bitrate: "192k"
+  sample_rate: 44100

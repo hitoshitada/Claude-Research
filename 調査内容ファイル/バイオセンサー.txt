@@ -1,0 +1,12 @@
+バイオセンサー（biosensor）に関する最新の記事・論文・プレスリリース。
+検索キーワード: biosensor, wearable sensor, continuous glucose monitor CGM, point-of-care testing POCT, electrochemical sensor, optical biosensor, MEMS biosensor, digital health sensor, lab-on-chip
+対象トピック:
+① 連続血糖モニター（CGM）の技術革新と市場拡大（Dexcom, Abbott Libre, Medtronic等の新製品）
+② ウェアラブルバイオセンサーの進展（汗・涙・唾液中バイオマーカー検出、パッチ型デバイス）
+③ ポイントオブケア検査（POCT）の新技術（感染症迅速診断、がんマーカー、心筋マーカー）
+④ 電気化学センサー・光学センサーの感度・選択性改善技術
+⑤ Lab-on-a-chip・マイクロ流体デバイスの臨床応用
+⑥ AIとバイオセンサーの融合（機械学習によるデータ解析、予測診断）
+⑦ 環境モニタリング用バイオセンサー（水質、大気、食品安全）
+⑧ 主要企業動向（Abbott, Dexcom, Roche, Siemens Healthineers, 浜松ホトニクス, シスメックス等）
+⑨ フレキシブル・伸縮性バイオセンサーの材料技術

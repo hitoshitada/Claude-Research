@@ -1,0 +1,12 @@
+接着・封止材（adhesive / sealant / encapsulant）に関する最新の記事・論文・プレスリリース。
+検索キーワード: adhesive technology, structural adhesive, semiconductor encapsulant, underfill, die attach, thermal interface material TIM, UV curable adhesive, epoxy molding compound EMC, sealant, bonding film
+対象トピック:
+① 半導体封止材の技術革新（EMC低誘電率化、低応力化、薄型パッケージ対応、ウエハーレベル封止）
+② アンダーフィル材料の進展（毛細管アンダーフィル、事前塗布型、微細ピッチフリップチップ対応）
+③ ダイアタッチ材料・焼結接合技術（Agシンタリング、Cuシンタリング、パワー半導体向け高耐熱接合）
+④ 放熱材料（TIM）の高性能化（高熱伝導率ペースト、相変化型、グラファイトシート）
+⑤ 構造用接着剤の進展（自動車軽量化、異材接合、CFRP接着、耐衝撃性向上）
+⑥ UV/光硬化型接着剤の新応用（光学部品、ディスプレイ、医療機器）
+⑦ EV電池モジュール用接着・封止・絶縁材料の技術動向
+⑧ 主要企業動向（Henkel, 3M, Resonac, 日東電工, 住友ベークライト, Namics, Heraeus, Indium等）
+⑨ 環境対応（VOCフリー、ハロゲンフリー、リサイクル対応接着剤）の開発動向

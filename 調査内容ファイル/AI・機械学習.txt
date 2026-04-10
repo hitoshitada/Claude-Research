@@ -1,0 +1,12 @@
+AI・機械学習（Artificial Intelligence / Machine Learning）に関する最新の記事・論文・プレスリリース。
+検索キーワード: large language model LLM, generative AI, AI chip, AI infrastructure, foundation model, multimodal AI, AI agent, edge AI, AI regulation, AI semiconductor
+対象トピック:
+① 大規模言語モデルの新リリース・性能比較（GPT, Claude, Gemini, Llama, Mistral, DeepSeek等）
+② AIチップ・アクセラレータの技術動向（NVIDIA, AMD, Intel, Google TPU, Groq, Cerebras, サムスン, TSMC AI向け製造）
+③ AIエージェント・自律型AIシステムの開発動向
+④ エッジAI・オンデバイスAIの進展（スマートフォン、IoT、自動車向け）
+⑤ マルチモーダルAI（テキスト・画像・動画・音声の統合モデル）の最新技術
+⑥ AI規制・ガバナンス動向（EU AI Act, 米国大統領令, 日本のAI戦略）
+⑦ 産業応用事例（製造業、創薬、金融、自動運転、ロボティクスへのAI導入）
+⑧ AIスタートアップの大型資金調達・M&A・IPO
+⑨ AI学習用データセンターの建設・電力需要動向

@@ -1,0 +1,11 @@
+ペロブスカイト太陽電池（perovskite solar cell）に関する最新の記事・論文・プレスリリース。
+検索キーワード: perovskite solar cell, perovskite tandem, perovskite photovoltaic, perovskite module, perovskite stability, perovskite manufacturing
+対象トピック:
+① 変換効率の世界記録更新（単接合・タンデム型の最新効率記録）
+② タンデム型太陽電池の進展（ペロブスカイト/シリコン、ペロブスカイト/ペロブスカイト、ペロブスカイト/CIGS）
+③ 量産化・大面積化の技術進展（ロール・トゥ・ロール製造、スロットダイコーティング、印刷プロセス）
+④ 長期安定性・耐久性の改善（封止技術、組成改良、加速劣化試験結果）
+⑤ 鉛フリー・環境対応型ペロブスカイトの開発状況
+⑥ 主要企業動向（Oxford PV, Hanwha Qcells, LONGi, First Solar, Saule Technologies, Swift Solar, 積水化学, パナソニック, 東芝等）
+⑦ 各国の政策支援・大型実証プロジェクト
+⑧ BIPVやフレキシブル用途など新規応用分野

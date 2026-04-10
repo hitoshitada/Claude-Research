@@ -1,0 +1,12 @@
+機能性材料（functional materials / advanced materials）に関する最新の記事・論文・プレスリリース。
+検索キーワード: functional materials, smart materials, shape memory alloy, piezoelectric, thermoelectric, metamaterial, self-healing material, phase change material, magnetic material, high-entropy alloy
+対象トピック:
+① 形状記憶合金・形状記憶ポリマーの新応用（医療デバイス、ソフトロボティクス、航空宇宙）
+② 圧電材料の進展（鉛フリー圧電セラミックス、フレキシブル圧電素子、エネルギーハーベスティング）
+③ 熱電変換材料の効率向上と応用展開（排熱回収、ウェアラブル発電）
+④ メタマテリアル・フォノニック結晶の実用化動向
+⑤ 自己修復材料の最新研究（コーティング、構造材料、エレクトロニクス向け）
+⑥ 相変化材料（PCM）の蓄熱・温度調節応用
+⑦ ハイエントロピー合金の新特性発見と実用化研究
+⑧ 磁性材料の革新（希土類フリー永久磁石、スピントロニクス材料）
+⑨ 機能性コーティング技術（超撥水、抗菌、反射防止、自己清浄）

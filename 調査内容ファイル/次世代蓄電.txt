@@ -1,0 +1,11 @@
+次世代蓄電技術（next-generation energy storage）に関する最新の記事・論文・プレスリリース。全固体電池を除く新型蓄電技術全般。
+検索キーワード: sodium-ion battery, lithium-sulfur battery, zinc-air battery, redox flow battery, silicon anode, lithium metal anode, dry battery electrode, battery recycling, grid-scale storage, LDES
+対象トピック:
+① ナトリウムイオン電池の商用化動向（CATL, BYD, HiNa, Faradion/Reliance, Tiamat等）
+② リチウム硫黄電池・リチウム空気電池の研究進展
+③ シリコン負極・リチウム金属負極の実用化技術（Sila Nano, Enovix, Amprius, SES AI等）
+④ レドックスフロー電池・長時間蓄電（LDES）技術の進展（ESS Inc, Invinity, Form Energy等）
+⑤ 電池リサイクル技術（直接リサイクル、湿式/乾式精錬、ブラックマス処理）
+⑥ 電池材料のサプライチェーン動向（リチウム、コバルト、ニッケル、マンガン、黒鉛の価格・供給）
+⑦ 大型蓄電システム（BESS）の導入事例・火災安全対策
+⑧ 次世代電池の性能比較データ（エネルギー密度、コスト $/kWh、寿命）

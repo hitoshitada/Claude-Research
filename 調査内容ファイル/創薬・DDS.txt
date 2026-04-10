@@ -1,0 +1,12 @@
+創薬・ドラッグデリバリーシステム（drug discovery / drug delivery system）に関する最新の記事・論文・プレスリリース。
+検索キーワード: drug discovery AI, drug delivery system DDS, lipid nanoparticle LNP, antibody drug conjugate ADC, mRNA therapeutics, targeted delivery, nanomedicine, PROTAC, molecular glue, GLP-1
+対象トピック:
+① AI創薬の最新動向（AlphaFold活用、生成AI分子設計、臨床試験入り化合物）
+② 脂質ナノ粒子（LNP）技術の進展（mRNAワクチン以外の治療応用、臓器標的化）
+③ 抗体薬物複合体（ADC）の新規承認・パイプライン動向
+④ 核酸医薬のデリバリー技術（siRNA, ASO, mRNA用のDDSプラットフォーム）
+⑤ PROTAC・分子糊（molecular glue）等の新創薬モダリティ
+⑥ GLP-1受容体作動薬の適応拡大と市場動向
+⑦ 主要企業動向（Moderna, BioNTech, Alnylam, Daiichi Sankyo/AstraZeneca ADC, Recursion, Insilico Medicine等）
+⑧ マイクロニードル・経皮DDSなどの新規投与経路技術
+⑨ FDA/EMA/PMDAの新薬承認・ブレークスルー指定の最新動向

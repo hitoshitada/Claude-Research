@@ -1,0 +1,12 @@
+iPS細胞・再生医療（iPSC / regenerative medicine）に関する最新の記事・論文・プレスリリース。
+検索キーワード: iPSC, induced pluripotent stem cell, cell therapy, gene therapy, CAR-T, regenerative medicine, stem cell clinical trial, allogeneic cell therapy, ex vivo gene editing, CRISPR therapeutics
+対象トピック:
+① iPS細胞由来の治療製品の臨床試験進捗（心筋、網膜、血小板、神経、膵島細胞等）
+② CAR-T/CAR-NK細胞療法の次世代技術（同種由来、iPSC由来、固形がん対応）
+③ 遺伝子治療・遺伝子編集の臨床応用（CRISPR, base editing, prime editing）
+④ 再生医療の規制承認・薬事動向（FDA, EMA, PMDA）
+⑤ 主要企業・研究機関の動向（CiRA, FUJIFILM Cellular Dynamics, BlueRock, Vertex, Editas, Intellia, Beam等）
+⑥ 再生医療の製造技術（大規模分化誘導、品質管理、サプライチェーン）
+⑦ エクソソーム・細胞外小胞の治療応用
+⑧ 3Dバイオプリンティングによる組織・臓器構築の最新成果
+⑨ 再生医療スタートアップの資金調達・提携・上場動向

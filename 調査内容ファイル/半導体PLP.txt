@@ -1,0 +1,12 @@
+半導体後工程・先端パッケージング技術に関する最新の記事・論文・プレスリリース。
+検索キーワード: advanced packaging, panel-level packaging PLP, fan-out wafer-level packaging FOWLP, chiplet, 2.5D/3D packaging, hybrid bonding, CoWoS, InFO, HBM, RDL, molding, underfill, die attach
+対象トピック:
+① チップレット・ヘテロジニアスインテグレーションの最新技術（UCIe規格、ダイ・トゥ・ダイ接続）
+② パネルレベルパッケージング（PLP）の新プロセス・材料・装置の進展
+③ ハイブリッドボンディング技術の量産化動向（Cu-Cu直接接合、微細ピッチ化）
+④ HBM（High Bandwidth Memory）の技術進化と需要動向（SK hynix, Samsung, Micron）
+⑤ TSMCの先端パッケージング（CoWoS, InFO, SoIC）の最新動向
+⑥ OSAT企業の動向（ASE, Amkor, JCET, PTI等の設備投資・技術開発）
+⑦ パッケージング材料の革新（ABFフィルム、モールド材、再配線層材料、感光性材料）
+⑧ 後工程向け装置の技術動向（リソグラフィ、ボンディング、検査、ダイシング）
+⑨ AI/HPC向けパッケージング需要とサプライチェーン分析

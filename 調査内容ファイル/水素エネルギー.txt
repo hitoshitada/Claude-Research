@@ -1,0 +1,11 @@
+水素エネルギー（hydrogen energy）に関する最新の記事・論文・プレスリリース。
+検索キーワード: green hydrogen, hydrogen electrolyzer, fuel cell, hydrogen storage, hydrogen infrastructure, PEM electrolyzer, SOEC, alkaline electrolyzer, hydrogen carrier, ammonia fuel
+対象トピック:
+① グリーン水素製造技術の進展（PEM電解、SOEC、アルカリ電解、AEM電解の効率向上・コスト低減）
+② 水素貯蔵・輸送技術（高圧タンク、液化水素、有機ハイドライド、アンモニア、LOHC）
+③ 燃料電池技術の最新動向（PEFC、SOFC、商用車・船舶・航空機向け応用）
+④ 大規模水素プロジェクトの進捗（中東、オーストラリア、チリ、EU、日本の国家戦略）
+⑤ 水素サプライチェーン構築（パイプライン、水素ステーション、国際間輸送網）
+⑥ 主要企業動向（Plug Power, ITM Power, Nel ASA, Bloom Energy, Ballard Power, Air Liquide, 川崎重工, ENEOS, 岩谷産業等）
+⑦ 電解装置のギガワット級工場建設・稼働ニュース
+⑧ 水素関連の規格策定・認証・政策動向

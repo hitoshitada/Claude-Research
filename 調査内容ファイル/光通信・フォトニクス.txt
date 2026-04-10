@@ -1,0 +1,12 @@
+光通信・フォトニクス（optical communications / photonics）に関する最新の記事・論文・プレスリリース。
+検索キーワード: silicon photonics, optical interconnect, co-packaged optics CPO, coherent optics, photonic integrated circuit PIC, optical transceiver, 800G/1.6T, LiDAR photonics, quantum photonics
+対象トピック:
+① シリコンフォトニクス技術の進展（PIC集積度向上、光I/O、光電融合チップ）
+② CPO（co-packaged optics）の実用化動向とデータセンター導入計画
+③ 高速光トランシーバー（800G/1.6T）の量産・次世代規格動向
+④ 光インターコネクト技術（チップ間・ボード間の光配線、光電変換）
+⑤ コヒーレント光通信の長距離・大容量化技術
+⑥ 主要企業動向（Intel, Broadcom, Marvell, Cisco, Lumentum, II-VI/Coherent, 住友電工, 古河電工, NTT IOWN等）
+⑦ AI/HPCデータセンター向け光接続需要の拡大と設備投資
+⑧ 新素材（InP, LiNbO3, SiN）による光デバイスの性能革新
+⑨ LiDAR・量子フォトニクス等の応用分野の最新動向

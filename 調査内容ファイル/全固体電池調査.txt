@@ -1,0 +1,11 @@
+全固体電池（solid-state battery）に関する最新の記事・論文・プレスリリース。
+検索キーワード: solid-state battery, all-solid-state battery, solid electrolyte, sulfide electrolyte, oxide electrolyte, polymer electrolyte, dry electrode, solid-state EV battery
+対象トピック:
+① OEM・自動車メーカーの全固体電池採用動向（Toyota, BMW, Nissan, NIO, BYD, Hyundai, VW等）
+② 電池メーカーの量産化ロードマップ（Samsung SDI, CATL, LG Energy Solution, Panasonic, QuantumScape, Solid Power, ProLogium, Factorial Energy等）
+③ 固体電解質の新材料・新製法（硫化物系、酸化物系、ポリマー系の伝導率改善・界面抵抗低減）
+④ 乾式電極（dry electrode）プロセス技術の進展
+⑤ 量産設備・製造技術の進展（スタック組立、加圧プロセス、品質検査）
+⑥ 性能指標の最新データ（エネルギー密度 Wh/kg、充電速度、サイクル寿命、動作温度範囲）
+⑦ スタートアップの資金調達・提携・買収ニュース
+⑧ 市場予測・コスト分析レポート
