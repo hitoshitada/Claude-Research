@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# ベースディレクトリ
-BASE_DIR = Path(__file__).parent
+# ベースディレクトリ（プロジェクトルート = lib/ の親）
+BASE_DIR = Path(__file__).parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 

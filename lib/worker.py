@@ -12,15 +12,15 @@ from dataclasses import dataclass
 from typing import Optional
 
 from google import genai
-from config import INVESTIGATION_DIR, IMAGE_WORKERS, STRUCTURING_MODEL, build_summary_prompt
-from search_grounding_client import create_client, search_articles, ResearchResult
-from article_parser import (
+from .config import INVESTIGATION_DIR, IMAGE_WORKERS, STRUCTURING_MODEL, build_summary_prompt
+from .search_grounding_client import create_client, search_articles, ResearchResult
+from .article_parser import (
     Article,
     resolve_redirect_urls,
     extract_articles_from_report,
 )
-from image_extractor import extract_image_url
-from html_generator import (
+from .image_extractor import extract_image_url
+from .html_generator import (
     generate_article_html,
     make_output_folder,
     get_next_article_number,
@@ -29,8 +29,9 @@ from html_generator import (
     save_summary_html,
     SavedArticleInfo,
 )
-from pdf_generator import generate_combined_pdf
-from podcast_generator import generate_podcast
+from .pdf_generator import generate_combined_pdf
+from .podcast_generator import generate_podcast
+from .weekly_report_generator import generate_weekly_report
 
 
 @dataclass
@@ -297,10 +298,34 @@ class ResearchWorker:
             except Exception as e:
                 self._send("error", f"PDF生成に失敗: {str(e)}", topic=topic_name)
 
-        # Step 10: ポッドキャスト音声を生成
+        # Step 9.5: Weekly Intelligence Report (フロントレポート) を生成
+        if articles:
+            self._send("status", "Weekly Intelligence Report 生成中...", topic=topic_name)
+            try:
+                # 既存の記事PDF (Step 9 で生成) をフロントレポートと連結
+                existing_pdf = pdf_path if 'pdf_path' in locals() else None
+
+                def wr_progress(msg: str):
+                    self._send("status", f"WeeklyReport: {msg}", topic=topic_name)
+                    self._send("log", f"  [WeeklyReport] {msg}", topic=topic_name)
+
+                wr_path = generate_weekly_report(
+                    client=client,
+                    articles=articles,
+                    topic_name=topic_name,
+                    output_folder=output_folder,
+                    collection_date=collection_date,
+                    existing_articles_pdf=existing_pdf,
+                    progress_callback=wr_progress,
+                )
+                self._send("log", f"WeeklyReport保存: {wr_path.name}", topic=topic_name)
+            except Exception as e:
+                self._send("error", f"WeeklyReport生成に失敗: {str(e)}", topic=topic_name)
+
+        # Step 10: ポッドキャス��音声を生成
         if articles:
             self._send("status", "ポッドキャスト音声を生成中...", topic=topic_name)
-            self._send("log", "ポッドキャスト生成を開始...", topic=topic_name)
+            self._send("log", "ポッドキ���スト生成を開始...", topic=topic_name)
             try:
                 date_str = datetime.now().strftime("%Y%m%d")
 

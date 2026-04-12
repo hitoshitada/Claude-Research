@@ -12,8 +12,8 @@ import requests
 from fpdf import FPDF
 from fpdf.fonts import FontFace
 
-from article_parser import Article
-from config import HTTP_HEADERS, HTTP_TIMEOUT
+from .article_parser import Article
+from .config import HTTP_HEADERS, HTTP_TIMEOUT
 
 # =====================================================================
 # カラー定数（HTMLテーマと統一）

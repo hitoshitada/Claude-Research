@@ -6,8 +6,8 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
-from article_parser import Article
-from config import OUTPUT_DIR
+from .article_parser import Article
+from .config import OUTPUT_DIR
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>

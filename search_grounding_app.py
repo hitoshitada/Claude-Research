@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 PROJECT_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from config import INVESTIGATION_DIR, OUTPUT_DIR, ENV_FILE
-from worker import ResearchWorker, ProgressMessage
+from lib.config import INVESTIGATION_DIR, OUTPUT_DIR, ENV_FILE
+from lib.worker import ResearchWorker, ProgressMessage
 
 
 class SearchGroundingApp:

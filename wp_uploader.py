@@ -98,6 +98,90 @@ def detect_category(folder_name: str) -> str | None:
 
 
 # =====================================================================
+# 記事内容カテゴリー分類（企業動向 / 市場動向 / 新技術・技術紹介）
+# =====================================================================
+_CONTENT_CATEGORY_RULES: list[tuple[str, list[str]]] = [
+    ("企業動向", [
+        # 企業・組織名
+        "企業", "会社", "メーカー", "スタートアップ", "グループ",
+        # 事業活動
+        "製品発表", "新製品", "量産", "量産化", "パイロット", "パイロットライン",
+        "工場", "生産ライン", "生産拠点", "稼働", "稼働開始",
+        # 投資・資本
+        "投資", "資金調達", "融資", "出資",
+        # 提携・M&A
+        "提携", "買収", "合弁", "パートナーシップ", "共同開発", "協業",
+        # 戦略・計画
+        "戦略", "ロードマップ", "計画", "目標", "方針",
+        # 上場・業績
+        "上場", "株式", "売上", "収益", "業績", "利益",
+        # 商業展開
+        "商業化", "商業生産", "サンプル出荷", "サンプル提供", "販売開始",
+    ]),
+    ("市場動向", [
+        # 市場・需給
+        "市場", "需要", "供給", "価格", "コスト",
+        # 成長・予測
+        "成長率", "CAGR", "予測", "見通し", "展望", "予想",
+        # 調査・レポート
+        "調査", "調査レポート", "市場調査", "リサーチ",
+        # 競争・シェア
+        "シェア", "競争", "競合", "市場占有率",
+        # 業界・トレンド
+        "業界", "トレンド", "動向", "普及",
+        # 貿易・地域
+        "輸出", "輸入", "貿易", "サプライチェーン",
+        "グローバル", "アジア", "欧州", "北米", "中国市場", "米国市場",
+        # 規制・政策
+        "規制", "政策", "補助金", "政府", "法規制", "標準化", "規格",
+        # 金額・規模
+        "億ドル", "兆円", "億円", "市場規模",
+    ]),
+    ("新技術・技術紹介", [
+        # 研究・学術
+        "研究", "論文", "学術", "大学", "研究所", "研究機関", "教授", "博士",
+        # 発見・開発
+        "発見", "新手法", "ブレークスルー", "新技術", "革新",
+        # 性能・特性
+        "性能向上", "特性改善", "高性能", "高効率",
+        # 技術解析
+        "メカニズム", "解析", "分析", "評価", "実証",
+        # 製造・合成
+        "合成", "製法", "プロセス", "構造", "微細構造",
+        # 試作・実験
+        "プロトタイプ", "試作", "実験", "検証", "テスト",
+        # 特許・イノベーション
+        "特許", "イノベーション", "先端技術", "次世代技術",
+        # 技術分野キーワード
+        "ナノ", "量子", "固体電解質", "電解質", "正極", "負極",
+    ]),
+]
+
+
+def detect_content_category(article: dict) -> str | None:
+    """記事のタイトル・概要・詳細テキストをスコアリングして
+    「企業動向」「市場動向」「新技術・技術紹介」の最も適切なカテゴリーを返す。
+    スコアが同点の場合は None を返す（判定不能）。
+    """
+    # HTML除去してテキスト取得（タイトル2倍重み付き）
+    title_text = article.get("title", "")
+    summary_text = BeautifulSoup(article.get("summary", ""), "html.parser").get_text()
+    detail_text  = BeautifulSoup(article.get("detail",  ""), "html.parser").get_text()
+    full_text = title_text * 2 + " " + summary_text + " " + detail_text
+
+    scores: dict[str, int] = {}
+    for category_name, keywords in _CONTENT_CATEGORY_RULES:
+        score = sum(full_text.count(kw) for kw in keywords)
+        scores[category_name] = score
+
+    # 最高スコアのカテゴリーを返す（0点なら None）
+    best_cat = max(scores, key=lambda c: scores[c])
+    if scores[best_cat] == 0:
+        return None
+    return best_cat
+
+
+# =====================================================================
 # HTML記事パーサー
 # =====================================================================
 def parse_article_html(filepath: Path) -> dict:
@@ -237,25 +321,42 @@ class WordPressClient:
             f"メディアアップロード失敗: {resp.status_code} {resp.text[:300]}"
         )
 
-    def get_or_create_category(self, category_name: str) -> int | None:
-        """カテゴリーをWordPressから検索し、なければ新規作成してIDを返す"""
-        # 既存カテゴリーを検索
+    def get_or_create_category(
+        self, category_name: str, parent_id: int | None = None
+    ) -> int | None:
+        """カテゴリーをWordPressから検索し、なければ新規作成してIDを返す。
+
+        parent_id が指定された場合は、そのカテゴリーの子として検索・作成する。
+        これにより「半導体後工程 > 企業動向」「全固体電池 > 市場動向」など
+        親カテゴリーに紐付いた子カテゴリーが正しく設定される。
+        """
+        # 検索パラメータ（parent指定で子カテゴリーに絞り込む）
+        params: dict = {"search": category_name, "per_page": 100}
+        if parent_id is not None:
+            params["parent"] = parent_id
+
         resp = requests.get(
             f"{self.api_url}/categories",
             auth=self.auth,
-            params={"search": category_name, "per_page": 100},
+            params=params,
             timeout=10,
         )
         if resp.status_code == 200:
             for cat in resp.json():
                 if cat.get("name") == category_name:
-                    return cat["id"]
+                    # parent_id 指定時は親が一致するものだけ返す
+                    if parent_id is None or cat.get("parent") == parent_id:
+                        return cat["id"]
 
         # 見つからなければ新規作成
+        create_data: dict = {"name": category_name}
+        if parent_id is not None:
+            create_data["parent"] = parent_id
+
         resp = requests.post(
             f"{self.api_url}/categories",
             auth=self.auth,
-            json={"name": category_name},
+            json=create_data,
             timeout=10,
         )
         if resp.status_code in (200, 201):
@@ -423,22 +524,51 @@ class WordPressClient:
 
     def update_post(self, post_id: int, content: str,
                     bump_to_top: bool = False) -> dict:
-        """既存投稿のコンテンツを更新する
+        """既存投稿のコンテンツを更新する。
 
-        Args:
-            post_id: 投稿ID
-            content: 新しいコンテンツ
-            bump_to_top: Trueの場合、投稿日時を現在時刻に更新して
-                         最新投稿としてトップに表示させる
+        コンテンツ更新と日付/sticky 更新を**別々のAPIコール**で行う。
+        同一リクエストに混在させると WordPress の content 保存フックが
+        date を元に戻すことがあるため、必ず2ステップで実行する。
         """
-        payload = {"content": content}
-        if bump_to_top:
-            # sticky=true で投稿一覧のトップに固定表示
-            payload["sticky"] = True
-            # 投稿日時も現在に更新（日本時間）
-            payload["date"] = datetime.now().strftime(
-                "%Y-%m-%dT%H:%M:%S"
+        # ── Step 1: コンテンツを publish で更新 ──
+        resp = requests.post(
+            f"{self.api_url}/posts/{post_id}",
+            auth=self.auth,
+            json={"content": content, "status": "publish"},
+            timeout=60,
+        )
+        if resp.status_code not in (200, 201):
+            raise Exception(
+                f"投稿コンテンツ更新失敗: {resp.status_code} {resp.text[:300]}"
             )
+        result = resp.json()
+
+        # ── Step 2: 日付・sticky を別コールで更新 ──
+        if bump_to_top:
+            result = self.bump_to_top(post_id)
+
+        return result
+
+    def bump_to_top(self, post_id: int) -> dict:
+        """投稿日時を現在時刻に更新し先頭に移動させる（単独APIコール）。
+
+        date（ローカル JST）と date_gmt（UTC）の両方を明示的に設定し、
+        sticky=True で公開状態にする。
+        """
+        from datetime import timezone as _tz, timedelta as _td
+        now_utc = datetime.now(_tz.utc)
+        now_utc_str = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
+        # WordPress の date フィールドはサイトのローカル日時。
+        # 日本語サイト = JST (UTC+9) に合わせて明示的に設定する。
+        now_jst = now_utc + _td(hours=9)
+        now_jst_str = now_jst.strftime("%Y-%m-%dT%H:%M:%S")
+
+        payload = {
+            "date":     now_jst_str,   # ローカル日時（JST）
+            "date_gmt": now_utc_str,   # UTC 日時
+            "status":   "publish",
+            "sticky":   True,
+        }
         resp = requests.post(
             f"{self.api_url}/posts/{post_id}",
             auth=self.auth,
@@ -448,7 +578,7 @@ class WordPressClient:
         if resp.status_code in (200, 201):
             return resp.json()
         raise Exception(
-            f"投稿更新失敗: {resp.status_code} {resp.text[:300]}"
+            f"投稿トップ移動失敗: {resp.status_code} {resp.text[:300]}"
         )
 
     def create_post(
@@ -458,6 +588,8 @@ class WordPressClient:
         featured_media_id: int | None = None,
         category_ids: list[int] | None = None,
         status: str = "draft",
+        sticky: bool = False,
+        date_gmt: str | None = None,
     ) -> dict:
         """記事を投稿する"""
         data = {
@@ -469,6 +601,19 @@ class WordPressClient:
             data["featured_media"] = featured_media_id
         if category_ids:
             data["categories"] = category_ids
+        if sticky:
+            data["sticky"] = True
+        if date_gmt:
+            data["date_gmt"] = date_gmt
+            # date（ローカル JST）も明示設定して WordPress が正しく日付を解釈できるようにする
+            from datetime import timezone as _tz, timedelta as _td
+            try:
+                from datetime import datetime as _dt
+                utc_dt = _dt.strptime(date_gmt, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=_tz.utc)
+                jst_dt = utc_dt + _td(hours=9)
+                data["date"] = jst_dt.strftime("%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                pass  # date_gmt パース失敗時は date なし（WordPress が自動補完）
 
         resp = requests.post(
             f"{self.api_url}/posts",
@@ -498,18 +643,36 @@ def generate_image_with_gemini(
     """
     client = genai.Client(api_key=api_key)
 
-    # 概要からHTMLタグを除去してプロンプトに使用
-    clean_summary = BeautifulSoup(summary_text, "html.parser").get_text()[:400]
+    # 概要からHTMLタグを除去
+    clean_summary = BeautifulSoup(summary_text, "html.parser").get_text()
 
+    # ── タイトルから「文として読める英語の長文」要素を視覚的なキーワードに変換 ──
+    # 数値・金額・パーセント・年号などを除去（画像内テキストの原因になる）
+    import re as _re
+    title_visual = _re.sub(r'\$[\d,\.]+\s*[BbMmKk](?:illion|illion)?', '', title)
+    title_visual = _re.sub(r'[\d,\.]+\s*%', '', title_visual)
+    title_visual = _re.sub(r'\b20\d\d\b', '', title_visual)        # 西暦年
+    title_visual = _re.sub(r'\b(?:is set to|will reach|reach|in|by|for|of|the)\b',
+                           '', title_visual, flags=_re.IGNORECASE)
+    title_visual = _re.sub(r'\s{2,}', ' ', title_visual).strip(' ,.')
+
+    # 概要から視覚的イメージに使えるキーワードだけ抽出（先頭100字）
+    summary_short = _re.sub(r'\s+', ' ', clean_summary).strip()[:100]
+
+    # ── プロンプト設計のポイント ──
+    # 1) 「NO TEXT」を冒頭に置く（Imagenは先頭の指示を優先）
+    # 2) "Topic:" "Context:" のようなラベル表記を使わない（そのまま画像に描かれる）
+    # 3) 視覚的なシーン描写のみにする
+    # 4) プロンプト内の "NO TEXT" 表現でテキスト要素を排除（negative_prompt は API 非対応）
     prompt = (
-        "Create a professional, high-quality photorealistic illustration "
-        "suitable as a blog featured image. "
-        f"Topic: {title}. "
-        f"Context: {clean_summary}. "
-        "Style: Modern, clean, cinematic lighting, wide landscape composition. "
-        "IMPORTANT: Do NOT include any text, letters, words, sentences, labels, "
-        "captions, watermarks, logos, or written characters of any language in the image. "
-        "The image must be purely visual with zero text elements."
+        "NO TEXT. NO WORDS. NO LETTERS. NO NUMBERS. ZERO TEXT ELEMENTS. "
+        "A professional photorealistic wide-format image for a technology news blog. "
+        "Purely visual scene — no written characters, no captions, no labels, "
+        "no watermarks, no overlay text of any kind whatsoever. "
+        f"Visually depict the scene related to: {title_visual}. "
+        f"Visual atmosphere inspired by: {summary_short}. "
+        "Composition: wide 16:9, cinematic lighting, modern high-tech environment, "
+        "sharp focus, detailed. Completely text-free image."
     )
 
     response = client.models.generate_images(
@@ -530,6 +693,285 @@ def generate_image_with_gemini(
     pil_img = pil_img.resize((TARGET_WIDTH, TARGET_HEIGHT), PILImage.LANCZOS)
     pil_img.save(str(output_path), "PNG")
 
+    return output_path
+
+
+# =====================================================================
+# グラフ検出・再生成モジュール
+# =====================================================================
+
+def _img_mime(image_data: bytes) -> str:
+    """バイト列からMIMEタイプを簡易判定する"""
+    if image_data[:4] == b'\x89PNG':
+        return "image/png"
+    if image_data[:4] in (b'RIFF',) or image_data[8:12] == b'WEBP':
+        return "image/webp"
+    return "image/jpeg"
+
+
+def detect_chart_in_image(image_data: bytes, api_key: str) -> bool:
+    """Gemini Visionで画像内にグラフ/チャートが含まれるか検出する"""
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                types.Part.from_bytes(data=image_data, mime_type=_img_mime(image_data)),
+                types.Part.from_text(
+                    "Does this image contain any data visualization chart or graph "
+                    "(bar chart, line chart, pie chart, scatter plot, area chart, etc.)? "
+                    "Answer only 'yes' or 'no'."
+                ),
+            ],
+        )
+        return "yes" in response.text.lower()
+    except Exception:
+        return False
+
+
+def extract_chart_data(image_data: bytes, api_key: str) -> dict | None:
+    """Gemini Visionでグラフデータを JSON 形式で抽出する。
+
+    Returns:
+        {
+          "chart_type": "bar"|"line"|"pie"|"area"|"scatter"|"other",
+          "title": str, "x_label": str, "y_label": str, "unit": str,
+          "series": [{"name": str, "data": [{"label": str, "value": float}, ...]}]
+        }
+        抽出失敗時は None。
+    """
+    try:
+        import json as _json
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=image_data, mime_type=_img_mime(image_data)),
+                types.Part.from_text(
+                    "Extract all data from the chart/graph in this image.\n"
+                    "Return ONLY a valid JSON object with this structure:\n"
+                    '{"chart_type":"bar|line|pie|area|scatter|other",'
+                    '"title":"chart title or empty","x_label":"","y_label":"",'
+                    '"unit":"unit of values (%, billion USD, etc.) or empty",'
+                    '"series":[{"name":"series name or empty",'
+                    '"data":[{"label":"category or x-value","value":123.4}]}]}'
+                    "\nBe precise with all numeric values. No markdown, no explanation."
+                ),
+            ],
+            config={"response_mime_type": "application/json"},
+        )
+        text = re.sub(r'^```(?:json)?\s*', '', response.text.strip())
+        text = re.sub(r'\s*```$', '', text)
+        return _json.loads(text)
+    except Exception:
+        return None
+
+
+def render_chart_image(chart_data: dict,
+                        width: int = 900, height: int = 500) -> "PILImage.Image | None":
+    """matplotlibでグラフを描画し PIL Image を返す（著作権フリーの新グラフ）"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import io as _io
+
+        chart_type = chart_data.get("chart_type", "bar").lower()
+        title      = chart_data.get("title", "")
+        x_label    = chart_data.get("x_label", "")
+        y_label    = chart_data.get("y_label", "")
+        unit       = chart_data.get("unit", "")
+        series     = chart_data.get("series", [])
+
+        if not series or not series[0].get("data"):
+            return None
+
+        dpi = 100
+        fig, ax = plt.subplots(figsize=(width / dpi, height / dpi))
+        fig.patch.set_facecolor('#0d1b2a')
+        ax.set_facecolor('#1b2838')
+
+        palette = ['#4fc3f7', '#81c784', '#ffb74d', '#f48fb1',
+                   '#ce93d8', '#80deea', '#a5d6a7', '#fff176']
+
+        def _vals(s):
+            return [float(d.get("value", 0)) for d in s.get("data", [])]
+
+        def _labs(s):
+            return [str(d.get("label", "")) for d in s.get("data", [])]
+
+        if chart_type in ("bar",):
+            labels = _labs(series[0])
+            if len(series) > 1:
+                n = len(labels)
+                bw = 0.8 / len(series)
+                x = np.arange(n)
+                for si, s in enumerate(series):
+                    ax.bar(x + si * bw, _vals(s), bw,
+                           label=s.get("name", ""),
+                           color=palette[si % len(palette)],
+                           alpha=0.85, edgecolor="#ffffff20")
+                ax.set_xticks(x + bw * (len(series) - 1) / 2)
+                ax.set_xticklabels(labels, rotation=20, ha="right",
+                                   fontsize=8, color="#cccccc")
+                ax.legend(fontsize=8, facecolor="#1b2838", labelcolor="white")
+            else:
+                vals = _vals(series[0])
+                bars = ax.bar(range(len(labels)), vals,
+                              color=palette[:len(labels)], alpha=0.85,
+                              edgecolor="#ffffff20")
+                for bar, v in zip(bars, vals):
+                    ax.text(bar.get_x() + bar.get_width() / 2,
+                            bar.get_height(), f"{v:g}",
+                            ha="center", va="bottom", fontsize=7, color="#e0e0e0")
+                ax.set_xticks(range(len(labels)))
+                ax.set_xticklabels(labels, rotation=20, ha="right",
+                                   fontsize=8, color="#cccccc")
+
+        elif chart_type in ("line", "area"):
+            for si, s in enumerate(series):
+                labs = _labs(s)
+                vals = _vals(s)
+                col  = palette[si % len(palette)]
+                ax.plot(range(len(labs)), vals, color=col, linewidth=2.5,
+                        marker="o", markersize=5, label=s.get("name", ""), zorder=3)
+                if chart_type == "area":
+                    ax.fill_between(range(len(labs)), vals, alpha=0.2, color=col)
+            if len(series) > 1:
+                ax.legend(fontsize=8, facecolor="#1b2838", labelcolor="white")
+            labs_first = _labs(series[0])
+            ax.set_xticks(range(len(labs_first)))
+            ax.set_xticklabels(labs_first, rotation=20, ha="right",
+                               fontsize=8, color="#cccccc")
+
+        elif chart_type == "pie":
+            first = series[0].get("data", [])
+            pl = [str(d.get("label", "")) for d in first]
+            pv = [max(float(d.get("value", 0)), 0) for d in first]
+            wedges, texts, autotexts = ax.pie(
+                pv, labels=pl, colors=palette[:len(pl)],
+                autopct="%1.1f%%", startangle=90,
+                textprops={"color": "#e0e0e0", "fontsize": 8},
+                wedgeprops={"linewidth": 0.5, "edgecolor": "#0d1b2a"},
+            )
+            for at in autotexts:
+                at.set_color("#ffffff"); at.set_fontsize(7)
+        else:
+            # フォールバック: 棒グラフ
+            labs = _labs(series[0])
+            vals = _vals(series[0])
+            ax.bar(range(len(labs)), vals, color=palette[:len(labs)], alpha=0.85)
+            ax.set_xticks(range(len(labs)))
+            ax.set_xticklabels(labs, rotation=20, ha="right", fontsize=8, color="#cccccc")
+
+        # 軸・グリッド装飾（円グラフ以外）
+        if chart_type != "pie":
+            ax.tick_params(axis="y", colors="#aaaaaa", labelsize=8)
+            ax.tick_params(axis="x", colors="#aaaaaa")
+            for spine in ("bottom", "left"):
+                ax.spines[spine].set_color("#444444")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.yaxis.grid(True, alpha=0.2, color="#888888", linestyle="--")
+            ax.set_axisbelow(True)
+            full_y = f"{y_label} ({unit})" if unit else y_label
+            if full_y:
+                ax.set_ylabel(full_y, color="#bbbbbb", fontsize=8)
+            if x_label:
+                ax.set_xlabel(x_label, color="#bbbbbb", fontsize=8)
+
+        if title:
+            ax.set_title(title, color="#e0e0e0", fontsize=10,
+                         fontweight="bold", pad=10)
+
+        plt.tight_layout(pad=1.2)
+        buf = _io.BytesIO()
+        plt.savefig(buf, format="png", dpi=dpi,
+                    facecolor=fig.get_facecolor(), bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return PILImage.open(buf).copy()
+
+    except Exception:
+        return None
+
+
+def generate_image_with_chart(
+    api_key: str,
+    title: str,
+    summary_text: str,
+    chart_data: dict,
+    output_path: Path,
+) -> Path:
+    """Imagen背景 + matplotlibグラフを合成したアイキャッチ画像を生成する。
+
+    1. Imagen で右下スペースを確保した背景を生成
+    2. chart_data から matplotlib で新グラフを描画
+    3. 背景の右下にグラフを合成して 1920×1080 で保存
+    失敗時は通常の generate_image_with_gemini にフォールバック。
+    """
+    client = genai.Client(api_key=api_key)
+
+    # タイトルから数値・金額などを除去してビジュアル用に整形
+    import re as _re
+    title_visual = _re.sub(r'\$[\d,\.]+\s*[BbMm](?:illion)?', '', title)
+    title_visual = _re.sub(r'[\d,\.]+\s*%', '', title_visual)
+    title_visual = _re.sub(r'\b20\d\d\b', '', title_visual)
+    title_visual = _re.sub(r'\s{2,}', ' ', title_visual).strip(' ,.')
+    summary_short = _re.sub(r'\s+', ' ',
+        BeautifulSoup(summary_text, "html.parser").get_text()).strip()[:100]
+
+    # 右下を暗く空けたロンプト（グラフ配置スペース確保）
+    prompt = (
+        "NO TEXT. NO WORDS. NO LETTERS. NO NUMBERS. ZERO TEXT ELEMENTS. "
+        "Professional wide-format technology background image for a data-driven news article. "
+        "The lower-right quarter of the image should be relatively dark and clear "
+        "— reserved for a data chart that will be overlaid. "
+        f"Visual theme: {title_visual}. "
+        f"Atmosphere: {summary_short}. "
+        "Style: cinematic dark blue tech, modern, 16:9. Completely text-free."
+    )
+    # Step1: 背景画像生成
+    resp = client.models.generate_images(
+        model=IMAGE_MODEL,
+        prompt=prompt,
+        config=types.GenerateImagesConfig(
+            number_of_images=1,
+            aspect_ratio="16:9",
+        ),
+    )
+    if not resp.generated_images:
+        # 背景生成失敗 → 通常生成にフォールバック
+        return generate_image_with_gemini(api_key, title, summary_text, output_path)
+
+    bg_pil = PILImage.open(
+        io.BytesIO(resp.generated_images[0].image.image_bytes)
+    ).resize((TARGET_WIDTH, TARGET_HEIGHT), PILImage.LANCZOS).convert("RGBA")
+
+    # Step2: matplotlibでグラフ描画
+    chart_pil = render_chart_image(chart_data, width=860, height=480)
+    if chart_pil is None:
+        # グラフ描画失敗 → 背景だけ保存
+        bg_pil.convert("RGB").save(str(output_path), "PNG")
+        return output_path
+
+    # Step3: 右下にグラフを合成
+    chart_pil = chart_pil.convert("RGBA")
+    margin = 36
+    cw = int(TARGET_WIDTH * 0.48)
+    ch = int(cw * chart_pil.height / chart_pil.width)
+    chart_resized = chart_pil.resize((cw, ch), PILImage.LANCZOS)
+
+    cx = TARGET_WIDTH - cw - margin
+    cy = TARGET_HEIGHT - ch - margin
+
+    # グラフの背後に半透明パネル
+    panel = PILImage.new("RGBA", (cw + 16, ch + 16), (0, 0, 0, 190))
+    bg_pil.alpha_composite(panel, (cx - 8, cy - 8))
+    bg_pil.alpha_composite(chart_resized, (cx, cy))
+
+    bg_pil.convert("RGB").save(str(output_path), "PNG")
     return output_path
 
 
@@ -890,27 +1332,72 @@ class WPUploaderApp(tk.Tk):
         self._ask_photo_choice()
 
     def _ask_photo_choice(self):
-        """アイキャッチ画像の選択"""
+        """アイキャッチ画像の選択（3択ダイアログ）"""
         has_image = bool(self.current_article.get("image_url"))
 
-        if has_image:
-            use_existing = messagebox.askyesno(
-                "画像選択",
-                "記事の既存画像をアイキャッチ画像として使用しますか？\n\n"
-                "「はい」→ 既存画像をそのまま使用\n"
-                "「いいえ」→ AIで新規画像を生成",
-            )
-        else:
-            messagebox.showinfo(
-                "画像",
-                "記事に画像がないため、AIで画像を生成します。",
-            )
-            use_existing = False
-
-        if use_existing:
-            self._upload_with_existing_image()
-        else:
+        if not has_image:
+            messagebox.showinfo("画像", "記事に画像がないため、AIで画像を生成します。")
             self._generate_ai_image()
+            return
+
+        # ── 3択ダイアログを自前で構築 ──
+        choice_result = {"value": None}  # スレッドセーフな返値
+
+        dlg = tk.Toplevel(self)
+        dlg.title("アイキャッチ画像の選択")
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        dlg.geometry("420x170")
+
+        ttk.Label(
+            dlg,
+            text="記事の画像をどのように使用しますか？",
+            font=("Meiryo", 10),
+            wraplength=390,
+        ).pack(pady=(18, 12))
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack()
+
+        def _choose(v):
+            choice_result["value"] = v
+            dlg.destroy()
+
+        tk.Button(
+            btn_frame, text="既存画像をそのまま使用",
+            bg="#1565c0", fg="white", font=("Meiryo", 9),
+            padx=6, pady=4,
+            command=lambda: _choose("existing"),
+        ).pack(side="left", padx=6)
+
+        tk.Button(
+            btn_frame, text="グラフ読取＆新規生成",
+            bg="#7B1FA2", fg="white", font=("Meiryo", 9),
+            padx=6, pady=4,
+            command=lambda: _choose("chart"),
+        ).pack(side="left", padx=6)
+
+        tk.Button(
+            btn_frame, text="AI新規生成",
+            bg="#388E3C", fg="white", font=("Meiryo", 9),
+            padx=6, pady=4,
+            command=lambda: _choose("ai"),
+        ).pack(side="left", padx=6)
+
+        # キャンセル（×ボタン）
+        dlg.protocol("WM_DELETE_WINDOW", lambda: _choose("cancel"))
+        self.wait_window(dlg)
+
+        choice = choice_result["value"]
+        if choice == "existing":
+            self._upload_with_existing_image()
+        elif choice == "chart":
+            self._recreate_chart_image()
+        elif choice == "ai":
+            self._generate_ai_image()
+        else:
+            self._log("→ 画像選択キャンセル、記事スキップ")
+            self._next_article()
 
     # ---------------------------------------------------------------
     # 既存画像でアップロード
@@ -981,6 +1468,78 @@ class WPUploaderApp(tk.Tk):
                 self.after(0, lambda: self._confirm_generated_image(output_path))
             except Exception as e:
                 self.after(0, lambda: self._on_error(f"画像生成失敗: {e}"))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    # ---------------------------------------------------------------
+    # グラフ読取 → 新規画像生成
+    # ---------------------------------------------------------------
+    def _recreate_chart_image(self):
+        """元記事画像からグラフを読み取り、新しい合成画像を生成する"""
+        if not GEMINI_API_KEY:
+            messagebox.showerror("エラー", "GEMINI_API_KEYが.envに設定されていません")
+            self._enable_buttons()
+            return
+
+        img_url = self.current_article.get("image_url", "")
+        if not img_url:
+            self._log("記事に画像URLがないため、AI新規生成に切り替えます")
+            self._generate_ai_image()
+            return
+
+        html_path = self.current_article["filepath"]
+        output_path = html_path.with_suffix(".png")
+
+        self._log("元画像をダウンロード中...")
+
+        def task():
+            try:
+                # 1. 元画像をダウンロード
+                resp = requests.get(img_url, timeout=20,
+                                    headers={"User-Agent": "Mozilla/5.0"})
+                resp.raise_for_status()
+                image_data = resp.content
+                self.after(0, lambda: self._log("グラフの有無を検出中（Gemini Vision）..."))
+
+                # 2. グラフ検出
+                has_chart = detect_chart_in_image(image_data, GEMINI_API_KEY)
+                if not has_chart:
+                    self.after(0, lambda: self._log(
+                        "グラフが検出されませんでした → AI新規生成に切り替えます"))
+                    self.after(0, self._generate_ai_image)
+                    return
+
+                self.after(0, lambda: self._log(
+                    "グラフを検出しました。データを抽出中..."))
+
+                # 3. グラフデータ抽出
+                chart_data = extract_chart_data(image_data, GEMINI_API_KEY)
+                if not chart_data or not chart_data.get("series"):
+                    self.after(0, lambda: self._log(
+                        "グラフデータの抽出に失敗 → AI新規生成に切り替えます"))
+                    self.after(0, self._generate_ai_image)
+                    return
+
+                ctype   = chart_data.get("chart_type", "不明")
+                npoints = sum(len(s.get("data", []))
+                              for s in chart_data.get("series", []))
+                self.after(0, lambda: self._log(
+                    f"グラフ抽出完了: 種類={ctype}, データ点数={npoints}"))
+
+                # 4. Imagen背景 + matplotlibグラフ合成
+                self.after(0, lambda: self._log(
+                    "新しいイラスト+グラフ画像を生成中（しばらくお待ちください）..."))
+                generate_image_with_chart(
+                    GEMINI_API_KEY,
+                    self.current_article["title"],
+                    self.current_article["summary"],
+                    chart_data,
+                    output_path,
+                )
+                self.after(0, lambda: self._confirm_generated_image(output_path))
+
+            except Exception as e:
+                self.after(0, lambda: self._on_error(f"グラフ再生成失敗: {e}"))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1068,16 +1627,50 @@ class WPUploaderApp(tk.Tk):
                 )
 
                 # カテゴリーID取得
-                category_ids = None
+                category_ids = []
+                parent_cat_id: int | None = None
+
+                # 1) フォルダ名から判定した技術カテゴリー（例: 全固体電池、半導体後工程）
+                #    ← トップレベルで検索（parent_id 未指定）
                 if self.detected_category:
-                    cat_id = self.wp_client.get_or_create_category(
+                    parent_cat_id = self.wp_client.get_or_create_category(
                         self.detected_category
                     )
-                    if cat_id:
-                        category_ids = [cat_id]
+                    if parent_cat_id:
+                        category_ids.append(parent_cat_id)
                         self._log_safe(
-                            f"  カテゴリー設定: {self.detected_category} (ID: {cat_id})"
+                            f"  親カテゴリー: {self.detected_category}"
+                            f" (ID: {parent_cat_id})"
                         )
+
+                # 2) 記事内容から判定した記事種別カテゴリー
+                #    （企業動向 / 市場動向 / 新技術・技術紹介）
+                #    ← 必ず親カテゴリーの「子」として検索・作成する
+                #       例: 半導体後工程 > 企業動向 （トップレベルの企業動向ではない）
+                content_cat = detect_content_category(self.current_article)
+                if content_cat and parent_cat_id:
+                    content_cat_id = self.wp_client.get_or_create_category(
+                        content_cat, parent_id=parent_cat_id
+                    )
+                    if content_cat_id:
+                        category_ids.append(content_cat_id)
+                        self._log_safe(
+                            f"  記事種別カテゴリー: {self.detected_category} > {content_cat}"
+                            f" (ID: {content_cat_id})"
+                        )
+                elif content_cat and not parent_cat_id:
+                    # 親カテゴリーが未判定の場合はトップレベルにフォールバック
+                    content_cat_id = self.wp_client.get_or_create_category(content_cat)
+                    if content_cat_id:
+                        category_ids.append(content_cat_id)
+                        self._log_safe(
+                            f"  記事種別カテゴリー（トップ）: {content_cat}"
+                            f" (ID: {content_cat_id})"
+                        )
+                else:
+                    self._log_safe("  記事種別カテゴリー: 判定不能（スキップ）")
+
+                category_ids = category_ids if category_ids else None
 
                 # 記事投稿（下書き）
                 result = self.wp_client.create_post(
@@ -1277,17 +1870,23 @@ class WPUploaderApp(tk.Tk):
                 existing_content, new_blocks
             )
 
-            self.wp_client.update_post(
+            result = self.wp_client.update_post(
                 post_id, new_content, bump_to_top=True
             )
             self._log_safe(
-                f"  ✓ 投稿を更新・トップに移動しました (ID: {post_id})"
+                f"  ✓ 投稿を更新しました (ID: {post_id})"
+                f" status={result.get('status','?')}"
+                f" sticky={result.get('sticky','?')}"
+                f" date={result.get('date','?')}"
+                f" date_gmt={result.get('date_gmt','?')}"
             )
         else:
             self._log_safe(
-                f"  投稿「{report_title}」が見つかりません。新規作成します。"
+                f"  投稿「{report_title}」が見つかりません。新規公開投稿として作成します。"
             )
             try:
+                from datetime import timezone as _tz
+                now_utc = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
                 cat_id = self.wp_client.get_or_create_category(
                     self.detected_category
                 )
@@ -1296,12 +1895,25 @@ class WPUploaderApp(tk.Tk):
                     title=report_title,
                     content=content,
                     category_ids=[cat_id] if cat_id else None,
-                    status="draft",
+                    status="publish",   # 公開状態で作成（draft だと一覧に出ない）
+                    sticky=True,        # 先頭固定表示
+                    date_gmt=now_utc,   # 現在時刻を設定してトップへ
                 )
                 new_id = new_post.get("id", "?")
                 self._log_safe(
-                    f"  ✓ 新規投稿を下書きで作成しました (ID: {new_id})"
+                    f"  ✓ 新規投稿を作成しました (ID: {new_id})"
+                    f" status={new_post.get('status','?')}"
+                    f" sticky={new_post.get('sticky','?')}"
+                    f" date={new_post.get('date','?')}"
+                    f" date_gmt={new_post.get('date_gmt','?')}"
                 )
+                # 新規作成後もトップ移動を別コールで確実に適用
+                if isinstance(new_id, int):
+                    bump = self.wp_client.bump_to_top(new_id)
+                    self._log_safe(
+                        f"  ✓ トップ移動適用 sticky={bump.get('sticky','?')}"
+                        f" date={bump.get('date','?')}"
+                    )
             except Exception as e:
                 self._log_safe(f"  ✗ 新規投稿の作成に失敗: {e}")
 

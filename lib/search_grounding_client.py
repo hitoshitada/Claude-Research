@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 from google import genai
 from google.genai import types
-from config import SEARCH_MODEL, build_search_queries
+from .config import SEARCH_MODEL, build_search_queries
 
 
 @dataclass

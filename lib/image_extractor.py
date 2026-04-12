@@ -3,7 +3,7 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from config import HTTP_HEADERS, HTTP_TIMEOUT
+from .config import HTTP_HEADERS, HTTP_TIMEOUT
 
 
 def extract_image_url(article_url: str) -> str | None:

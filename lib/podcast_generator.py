@@ -16,7 +16,7 @@ import yaml
 from pathlib import Path
 from typing import Optional, Callable
 
-BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
 CORRECTIONS_LOG = BASE_DIR / "ポッドキャスト修正ログ.txt"
 
 # --- 外部設定ファイルから読み込み ---
@@ -49,6 +49,9 @@ RETRY_DELAY = _vp_config["retry_delay"]
 _char_config = _load_yaml("characters.yaml")
 NARRATOR_F = _char_config["female"]["narrator"]
 NARRATOR_M = _char_config["male"]["narrator"]
+
+# 感情プリセットを読み込み
+EMOTION_PRESETS = _vp_config.get("emotion_presets", {})
 
 
 def is_voicepeak_available() -> bool:
@@ -88,7 +91,17 @@ def _load_corrections_log() -> str:
             old = line.replace("変更前:", "").strip()
             if i + 1 < len(lines) and lines[i + 1].strip().startswith("変更後:"):
                 new = lines[i + 1].strip().replace("変更後:", "").strip()
-                corrections.append(f"- 「{old}」→「{new}」")
+                # 変更前テキストが英字のみの場合は「単独語として使われているときのみ」注記を追加
+                # （例: SEMI → セミ のとき、SEMICONDUCTORの中のSEMIは変えない）
+                import re as _re
+                if _re.match(r'^[A-Za-z]+$', old):
+                    corrections.append(
+                        f"- 「{old}」→「{new}」"
+                        f"（※英単語として単独で使われている場合のみ変更。"
+                        f"「{old}」が長い英単語の一部である場合は変更しないこと）"
+                    )
+                else:
+                    corrections.append(f"- 「{old}」→「{new}」")
                 i += 2
                 continue
         i += 1
@@ -147,20 +160,43 @@ def generate_dialogue_script(
 
 
 def parse_dialogue_script(text: str) -> list[dict]:
-    """F:/M:形式の対話原稿をパースし、speaker と text のリストを返す"""
+    """F[感情]:/M[感情]:形式の対話原稿をパースし、speaker, text, emotion のリストを返す
+
+    対応フォーマット:
+      F[H]: テキスト  → speaker="F", emotion="H", text="テキスト"
+      F: テキスト      → speaker="F", emotion="N", text="テキスト"（感情タグなし→N）
+      M[E]: テキスト   → speaker="M", emotion="E", text="テキスト"
+    """
+    # 感情タグ付きパターン: F[H]: or M[E]: （全角コロンも対応）
+    emotion_pattern = re.compile(r'^([FM])\[([A-Z])\]\s*[：:](.*)$')
+    # 感情タグなしパターン: F: or M:
+    simple_pattern = re.compile(r'^([FM])\s*[：:](.*)$')
+
     lines = []
     for line in text.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
-        if line.startswith("F:") or line.startswith("F："):
-            lines.append({"speaker": "F", "text": line[2:].strip()})
-        elif line.startswith("M:") or line.startswith("M："):
-            lines.append({"speaker": "M", "text": line[2:].strip()})
-        else:
-            # 前の話者の続き
-            if lines:
-                lines[-1]["text"] += line
+
+        m = emotion_pattern.match(line)
+        if m:
+            speaker = m.group(1)
+            emotion = m.group(2)
+            txt = m.group(3).strip()
+            lines.append({"speaker": speaker, "emotion": emotion, "text": txt})
+            continue
+
+        m2 = simple_pattern.match(line)
+        if m2:
+            speaker = m2.group(1)
+            txt = m2.group(2).strip()
+            lines.append({"speaker": speaker, "emotion": "N", "text": txt})
+            continue
+
+        # 前の話者の続き
+        if lines:
+            lines[-1]["text"] += line
+
     return lines
 
 
@@ -201,20 +237,49 @@ def split_long_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
     return segments
 
 
+def _get_emotion_params(speaker: str, emotion: str) -> dict:
+    """感情タグからVoicePeakのパラメータを取得する
+
+    Returns:
+        {"emotion": "happy=70,fun=50", "speed": 105, "pitch": 30}
+    """
+    defaults = {"emotion": "", "speed": SPEED, "pitch": 0}
+
+    speaker_presets = EMOTION_PRESETS.get(speaker, {})
+    if not speaker_presets:
+        return defaults
+
+    preset = speaker_presets.get(emotion, speaker_presets.get("N", {}))
+    return {
+        "emotion": preset.get("emotion", ""),
+        "speed": preset.get("speed", SPEED),
+        "pitch": preset.get("pitch", 0),
+    }
+
+
 def generate_wav_with_retry(
     text: str,
     narrator: str,
     output_path: Path,
     max_retries: int = MAX_RETRIES,
+    speaker: str = "F",
+    emotion: str = "N",
 ) -> bool:
-    """VoicePeakで1セグメントをWAV化（リトライ付き）"""
+    """VoicePeakで1セグメントをWAV化（リトライ付き・感情パラメータ対応）"""
+    params = _get_emotion_params(speaker, emotion)
+
     cmd = [
         VOICEPEAK_EXE,
         "--say", text,
         "--narrator", narrator,
-        "--speed", str(SPEED),
+        "--speed", str(params["speed"]),
+        "--pitch", str(params["pitch"]),
         "--out", str(output_path),
     ]
+
+    # 感情パラメータがあれば追加
+    if params["emotion"]:
+        cmd.extend(["--emotion", params["emotion"]])
 
     for attempt in range(max_retries):
         try:
@@ -320,14 +385,15 @@ def generate_audio_segments(
     0.3秒の無音を挿入し、自然な間を作る。
     """
     # --- 1. 全台詞を文単位でセグメント化 ---
-    # 各エントリ: (speaker, text, is_sentence_boundary)
+    # 各エントリ: (speaker, emotion, text, is_sentence_boundary)
     # is_sentence_boundary=True → この前に同一話者の文間の無音を挿入
     all_segments = []
     for line in dialogue:
+        emotion = line.get("emotion", "N")
         sentences = _split_sentences(line["text"])
         for si, sentence in enumerate(sentences):
             is_boundary = (si > 0)  # 同じセリフの2文目以降
-            all_segments.append((line["speaker"], sentence, is_boundary))
+            all_segments.append((line["speaker"], emotion, sentence, is_boundary))
 
     # --- 2. 無音WAVを準備 ---
     silence_wav = _generate_silence_wav(work_dir)
@@ -335,12 +401,12 @@ def generate_audio_segments(
         if progress_callback:
             progress_callback("WARNING: 無音WAV生成に失敗。文間の間なしで続行します")
 
-    # --- 3. 各セグメントをWAV化 ---
+    # --- 3. 各セグメントをWAV化（感情パラメータ付き） ---
     wav_files = []
     total = len(all_segments)
     seg_idx = 0  # WAVファイル番号
 
-    for i, (speaker, text, is_boundary) in enumerate(all_segments):
+    for i, (speaker, emotion, text, is_boundary) in enumerate(all_segments):
         # 同一話者の文間に無音を挿入
         if is_boundary and silence_wav.exists():
             wav_files.append(silence_wav)
@@ -348,11 +414,14 @@ def generate_audio_segments(
         narrator = NARRATOR_F if speaker == "F" else NARRATOR_M
         wav_path = work_dir / f"seg_{seg_idx:03d}.wav"
         speaker_label = "女性" if speaker == "F" else "男性"
+        emotion_label = {"N": "", "H": "🙂", "E": "🤩", "S": "🤔", "Q": "❓", "T": "😏"}.get(emotion, "")
 
         if progress_callback:
-            progress_callback(f"音声生成: {i + 1}/{total} ({speaker_label}, {len(text)}字)")
+            progress_callback(
+                f"音声生成: {i + 1}/{total} ({speaker_label}{emotion_label}, {len(text)}字)")
 
-        if generate_wav_with_retry(text, narrator, wav_path):
+        if generate_wav_with_retry(text, narrator, wav_path,
+                                   speaker=speaker, emotion=emotion):
             wav_files.append(wav_path)
         else:
             if progress_callback:

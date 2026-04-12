@@ -10,3 +10,68 @@ sentence_pause: 0.3     # 同一話者の文間の無音（秒）
 output:
   bitrate: "192k"
   sample_rate: 44100
+
+# ============================================
+# 感情タグ → VoicePeakパラメータ マッピング
+# ============================================
+# 感情タグ: [N]ニュートラル [H]ハッピー [E]興奮 [S]シリアス [Q]質問 [T]ツッコミ
+#
+# VoicePeak感情: happy(0-100), fun(0-100), angry(0-100), sad(0-100)
+# speed: 50-200 (100=通常)
+# pitch: -300 to 300 (0=通常)
+
+emotion_presets:
+  # --- スージー（女性）用 ---
+  F:
+    N:  # ニュートラル — 自然な語り
+      emotion: "happy=30,fun=20"
+      speed: 100
+      pitch: 0
+    H:  # ハッピー — 明るく楽しい
+      emotion: "happy=70,fun=50"
+      speed: 105
+      pitch: 30
+    E:  # 興奮・驚き — テンション高い
+      emotion: "happy=80,fun=70"
+      speed: 115
+      pitch: 50
+    S:  # シリアス — 真剣・考え込む
+      emotion: "sad=20"
+      speed: 92
+      pitch: -20
+    Q:  # 質問・疑問 — 語尾上がり
+      emotion: "happy=40,fun=30"
+      speed: 100
+      pitch: 40
+    T:  # ツッコミ — 軽快・冗談
+      emotion: "happy=50,fun=60,angry=20"
+      speed: 112
+      pitch: 20
+
+  # --- トロイ（男性）用 ---
+  # 専門家として落ち着いたトーン。自然な温かみと感情変化を持たせる。
+  M:
+    N:  # ニュートラル — 落ち着いた解説（基本形）
+      emotion: "happy=30,fun=10"
+      speed: 98
+      pitch: 0
+    H:  # ハッピー — 温かみのある明るいトーン
+      emotion: "happy=50,fun=25"
+      speed: 100
+      pitch: 8
+    E:  # 興奮 — 発見や驚きで少し熱が入る
+      emotion: "happy=60,fun=35"
+      speed: 103
+      pitch: 12
+    S:  # シリアス — 真剣で落ち着いた口調
+      emotion: "happy=15,sad=10"
+      speed: 95
+      pitch: -5
+    Q:  # 質問（稀に使用）
+      emotion: "happy=30,fun=10"
+      speed: 98
+      pitch: 15
+    T:  # 冗談 — 少し柔らかく親しみやすく
+      emotion: "happy=40,fun=25"
+      speed: 100
+      pitch: 5

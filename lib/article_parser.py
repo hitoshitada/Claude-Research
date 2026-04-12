@@ -6,8 +6,8 @@ import requests
 from dataclasses import dataclass, field
 from typing import Optional
 from google import genai
-from config import STRUCTURING_MODEL, build_structuring_prompt, HTTP_HEADERS
-from search_grounding_client import ResearchResult
+from .config import STRUCTURING_MODEL, build_structuring_prompt, HTTP_HEADERS
+from .search_grounding_client import ResearchResult
 
 
 @dataclass
