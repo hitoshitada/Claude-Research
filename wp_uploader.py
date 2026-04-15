@@ -581,6 +581,29 @@ class WordPressClient:
             f"投稿トップ移動失敗: {resp.status_code} {resp.text[:300]}"
         )
 
+    def search_media_by_keyword(self, keyword: str) -> int | None:
+        """メディアライブラリからキーワードに一致する画像のIDを返す。
+
+        WP REST API の /wp-json/wp/v2/media?search=keyword でタイトル・
+        alt text・ファイル名を横断検索し、最初にヒットした画像の ID を返す。
+        見つからない場合は None を返す。
+        """
+        try:
+            resp = requests.get(
+                f"{self.api_url}/media",
+                auth=self.auth,
+                params={"search": keyword, "media_type": "image", "per_page": 10},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return None
+            items = resp.json()
+            if items:
+                return items[0]["id"]
+        except Exception:
+            pass
+        return None
+
     def create_post(
         self,
         title: str,
@@ -1332,55 +1355,106 @@ class WPUploaderApp(tk.Tk):
         self._ask_photo_choice()
 
     def _ask_photo_choice(self):
-        """アイキャッチ画像の選択（3択ダイアログ）"""
+        """アイキャッチ画像の選択（4択ダイアログ）"""
         has_image = bool(self.current_article.get("image_url"))
 
         if not has_image:
-            messagebox.showinfo("画像", "記事に画像がないため、AIで画像を生成します。")
-            self._generate_ai_image()
+            # 画像なし → AI生成 or ライブラリ選択の2択
+            no_img_result = {"value": None}
+            dlg2 = tk.Toplevel(self)
+            dlg2.title("画像の選択")
+            dlg2.grab_set()
+            dlg2.resizable(False, False)
+            dlg2.geometry("380x160")
+
+            ttk.Label(
+                dlg2,
+                text="記事に画像がありません。\nどちらで画像を用意しますか？",
+                font=("Meiryo", 10),
+                justify="center",
+            ).pack(pady=(18, 12))
+
+            def _choose2(v):
+                no_img_result["value"] = v
+                dlg2.destroy()
+
+            row = ttk.Frame(dlg2)
+            row.pack()
+            tk.Button(
+                row, text="WPライブラリから選択",
+                bg="#00695C", fg="white", font=("Meiryo", 9),
+                padx=8, pady=5,
+                command=lambda: _choose2("library"),
+            ).pack(side="left", padx=8)
+            tk.Button(
+                row, text="AIで新規生成",
+                bg="#388E3C", fg="white", font=("Meiryo", 9),
+                padx=8, pady=5,
+                command=lambda: _choose2("ai"),
+            ).pack(side="left", padx=8)
+
+            dlg2.protocol("WM_DELETE_WINDOW", lambda: _choose2("cancel"))
+            self.wait_window(dlg2)
+
+            choice2 = no_img_result["value"]
+            if choice2 == "library":
+                self._pick_from_media_library(on_cancel=self._ask_photo_choice)
+            elif choice2 == "ai":
+                self._generate_ai_image()
+            else:
+                self._log("→ 画像選択キャンセル、記事スキップ")
+                self._next_article()
             return
 
-        # ── 3択ダイアログを自前で構築 ──
-        choice_result = {"value": None}  # スレッドセーフな返値
+        # ── 4択ダイアログを自前で構築 ──
+        choice_result = {"value": None}
 
         dlg = tk.Toplevel(self)
         dlg.title("アイキャッチ画像の選択")
         dlg.grab_set()
         dlg.resizable(False, False)
-        dlg.geometry("420x170")
+        dlg.geometry("440x220")
 
         ttk.Label(
             dlg,
             text="記事の画像をどのように使用しますか？",
             font=("Meiryo", 10),
-            wraplength=390,
-        ).pack(pady=(18, 12))
-
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack()
+            wraplength=410,
+        ).pack(pady=(16, 10))
 
         def _choose(v):
             choice_result["value"] = v
             dlg.destroy()
 
+        # 1行目: 記事の既存画像 / WPライブラリ
+        row1 = ttk.Frame(dlg)
+        row1.pack(pady=4)
         tk.Button(
-            btn_frame, text="既存画像をそのまま使用",
+            row1, text="記事の画像をそのまま使用",
             bg="#1565c0", fg="white", font=("Meiryo", 9),
-            padx=6, pady=4,
+            padx=8, pady=5, width=20,
             command=lambda: _choose("existing"),
         ).pack(side="left", padx=6)
-
         tk.Button(
-            btn_frame, text="グラフ読取＆新規生成",
-            bg="#7B1FA2", fg="white", font=("Meiryo", 9),
-            padx=6, pady=4,
-            command=lambda: _choose("chart"),
+            row1, text="WPライブラリから選択",
+            bg="#00695C", fg="white", font=("Meiryo", 9),
+            padx=8, pady=5, width=18,
+            command=lambda: _choose("library"),
         ).pack(side="left", padx=6)
 
+        # 2行目: グラフ生成 / AI生成
+        row2 = ttk.Frame(dlg)
+        row2.pack(pady=4)
         tk.Button(
-            btn_frame, text="AI新規生成",
+            row2, text="グラフ読取＆新規生成",
+            bg="#7B1FA2", fg="white", font=("Meiryo", 9),
+            padx=8, pady=5, width=20,
+            command=lambda: _choose("chart"),
+        ).pack(side="left", padx=6)
+        tk.Button(
+            row2, text="AI新規生成",
             bg="#388E3C", fg="white", font=("Meiryo", 9),
-            padx=6, pady=4,
+            padx=8, pady=5, width=18,
             command=lambda: _choose("ai"),
         ).pack(side="left", padx=6)
 
@@ -1391,6 +1465,8 @@ class WPUploaderApp(tk.Tk):
         choice = choice_result["value"]
         if choice == "existing":
             self._upload_with_existing_image()
+        elif choice == "library":
+            self._pick_from_media_library(on_cancel=self._ask_photo_choice)
         elif choice == "chart":
             self._recreate_chart_image()
         elif choice == "ai":
@@ -1398,6 +1474,242 @@ class WPUploaderApp(tk.Tk):
         else:
             self._log("→ 画像選択キャンセル、記事スキップ")
             self._next_article()
+
+    # ---------------------------------------------------------------
+    # WPメディアライブラリから画像を選択
+    # ---------------------------------------------------------------
+    def _pick_from_media_library(self, on_cancel=None):
+        """WPメディアライブラリをサムネイルグリッドで表示し、選択した画像でアップロード"""
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            messagebox.showerror("エラー", "Pillowが必要です: pip install Pillow")
+            self._next_article()
+            return
+
+        import io as _io
+
+        result = {"media_id": None}
+        photo_refs = []      # GC防止用
+
+        dlg = tk.Toplevel(self)
+        dlg.title("メディアライブラリから画像を選択")
+        dlg.geometry("880x640")
+        dlg.grab_set()
+
+        # ── ステータスバー ──
+        status_var = tk.StringVar(value="メディアライブラリを読み込み中...")
+        ttk.Label(dlg, textvariable=status_var, font=("Meiryo", 9)).pack(
+            padx=10, pady=(8, 2), anchor="w")
+
+        # ── スクロール可能なサムネイルグリッド ──
+        outer = ttk.Frame(dlg, relief="sunken", borderwidth=1)
+        outer.pack(fill="both", expand=True, padx=10, pady=4)
+
+        canvas = tk.Canvas(outer, bg="#f5f5f5", highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg="#f5f5f5")
+        inner_win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_resize(e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_resize(e=None):
+            canvas.itemconfig(inner_win, width=canvas.winfo_width())
+        inner.bind("<Configure>", _on_inner_resize)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        def _on_wheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_wheel)
+
+        # ── 下部: キャンセルボタン ──
+        bot = ttk.Frame(dlg)
+        bot.pack(fill="x", padx=10, pady=(2, 8))
+        ttk.Label(bot, text="画像をクリックして選択（選択と同時にダイアログが閉じます）",
+                  font=("Meiryo", 8), foreground="gray").pack(side="left")
+        ttk.Button(bot, text="キャンセル",
+                   command=lambda: (canvas.unbind_all("<MouseWheel>"),
+                                    dlg.destroy())).pack(side="right")
+
+        COLS = 5
+        TW, TH = 150, 105   # サムネイル表示サイズ
+
+        def _on_select(mid, name):
+            result["media_id"] = mid
+            canvas.unbind_all("<MouseWheel>")
+            dlg.destroy()
+
+        def _load():
+            """バックグラウンドでメディア一覧取得 → サムネイル描画"""
+            try:
+                sess = requests.Session()
+                sess.auth = self.wp_client.auth
+                api = self.wp_client.api_url
+
+                # 全画像の一覧取得
+                all_items = []
+                page = 1
+                while True:
+                    resp = sess.get(
+                        f"{api}/media",
+                        params={"per_page": 100, "page": page,
+                                "media_type": "image"},
+                        timeout=30,
+                    )
+                    if resp.status_code == 400:
+                        break
+                    total_pages = int(resp.headers.get("X-WP-TotalPages", 1))
+                    batch = resp.json()
+                    if not batch:
+                        break
+                    all_items.extend(batch)
+                    n = len(all_items)
+                    dlg.after(0, lambda p=page, tp=total_pages, cnt=n:
+                        status_var.set(
+                            f"一覧取得中... {cnt}件 (ページ {p}/{tp})"))
+                    if page >= total_pages:
+                        break
+                    page += 1
+
+                total = len(all_items)
+                dlg.after(0, lambda: status_var.set(
+                    f"サムネイルを読み込み中... 0/{total}"))
+
+                for idx, item in enumerate(all_items):
+                    # サムネイルURLを優先順位付きで取得
+                    sizes = item.get("media_details", {}).get("sizes", {})
+                    thumb_url = (
+                        sizes.get("thumbnail", {}).get("source_url")
+                        or sizes.get("medium", {}).get("source_url")
+                        or item.get("source_url", "")
+                    )
+                    mid = item["id"]
+                    name = item.get("title", {}).get("rendered", "") or f"media_{mid}"
+
+                    # サムネイル画像を取得してリサイズ
+                    try:
+                        r = sess.get(thumb_url, timeout=15)
+                        r.raise_for_status()
+                        img = Image.open(_io.BytesIO(r.content)).convert("RGB")
+                        img.thumbnail((TW, TH), Image.LANCZOS)
+                        bg = Image.new("RGB", (TW, TH), (220, 220, 220))
+                        bg.paste(img, ((TW - img.width) // 2,
+                                       (TH - img.height) // 2))
+                        photo = ImageTk.PhotoImage(bg)
+                    except Exception:
+                        photo = None
+
+                    # メインスレッドでUI更新
+                    def _add(i=idx, p=photo, m=mid, nm=name):
+                        if not dlg.winfo_exists():
+                            return
+                        if p:
+                            photo_refs.append(p)
+                        row, col = divmod(i, COLS)
+                        cell = tk.Frame(inner, bg="#f5f5f5",
+                                        cursor="hand2" if p else "arrow")
+                        cell.grid(row=row, column=col, padx=3, pady=3)
+                        if p:
+                            lbl = tk.Label(cell, image=p, bg="#f5f5f5",
+                                           cursor="hand2", borderwidth=2,
+                                           relief="groove")
+                            lbl.pack()
+                            lbl.bind("<Button-1>",
+                                     lambda e, mid=m, n=nm: _on_select(mid, n))
+                            lbl.bind("<Enter>",
+                                     lambda e, w=lbl: w.config(relief="solid"))
+                            lbl.bind("<Leave>",
+                                     lambda e, w=lbl: w.config(relief="groove"))
+                        short = (nm[:14] + "…") if len(nm) > 14 else nm
+                        tk.Label(cell, text=short, font=("Meiryo", 7),
+                                 bg="#f5f5f5", fg="#444444",
+                                 wraplength=TW).pack()
+
+                    dlg.after(0, _add)
+
+                    if (idx + 1) % 20 == 0:
+                        dlg.after(0, lambda n=idx + 1, tot=total:
+                            status_var.set(
+                                f"サムネイルを読み込み中... {n}/{tot}"))
+
+                dlg.after(0, lambda tot=total: status_var.set(
+                    f"読み込み完了 — {tot}件。クリックして画像を選択してください。"))
+
+            except Exception as e:
+                dlg.after(0, lambda: status_var.set(f"読み込みエラー: {e}"))
+
+        threading.Thread(target=_load, daemon=True).start()
+
+        dlg.protocol("WM_DELETE_WINDOW",
+                     lambda: (canvas.unbind_all("<MouseWheel>"), dlg.destroy()))
+        self.wait_window(dlg)
+
+        mid = result["media_id"]
+        if mid:
+            self._post_with_media_id(mid)
+        else:
+            self._log("→ ライブラリ選択キャンセル、選択画面に戻ります")
+            if on_cancel:
+                on_cancel()
+            else:
+                self._next_article()
+
+    def _post_with_media_id(self, media_id: int):
+        """既存メディアIDをアイキャッチに使って記事を投稿（画像アップロードなし）"""
+        self._log(f"WPライブラリの画像 (ID: {media_id}) をアイキャッチに設定して投稿...")
+
+        def task():
+            try:
+                content = format_wp_content(
+                    self.current_article["summary"],
+                    self.current_article["detail"],
+                    self.current_article.get("source_url", ""),
+                )
+
+                category_ids = []
+                parent_cat_id = None
+
+                if self.detected_category:
+                    parent_cat_id = self.wp_client.get_or_create_category(
+                        self.detected_category)
+                    if parent_cat_id:
+                        category_ids.append(parent_cat_id)
+                        self._log_safe(
+                            f"  親カテゴリー: {self.detected_category}"
+                            f" (ID: {parent_cat_id})")
+
+                content_cat = detect_content_category(self.current_article)
+                if content_cat and parent_cat_id:
+                    cid = self.wp_client.get_or_create_category(
+                        content_cat, parent_id=parent_cat_id)
+                    if cid:
+                        category_ids.append(cid)
+                        self._log_safe(
+                            f"  記事種別: {self.detected_category} > {content_cat}"
+                            f" (ID: {cid})")
+                elif content_cat:
+                    cid = self.wp_client.get_or_create_category(content_cat)
+                    if cid:
+                        category_ids.append(cid)
+
+                result = self.wp_client.create_post(
+                    title=self.current_article["title"],
+                    content=content,
+                    featured_media_id=media_id,
+                    category_ids=category_ids if category_ids else None,
+                    status="draft",
+                )
+                post_id = result.get("id", "?")
+                post_link = result.get("link", "")
+                self.after(0, lambda: self._on_upload_success(post_id, post_link))
+            except Exception as e:
+                self.after(0, lambda: self._on_error(str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
 
     # ---------------------------------------------------------------
     # 既存画像でアップロード
@@ -1849,73 +2161,95 @@ class WPUploaderApp(tk.Tk):
             self._log_safe("  アップロードできるファイルがありませんでした")
             return
 
-        # --- 2. ウィークリーレポート投稿を検索 ---
-        report_title = f"{self.detected_category}ウィークリーレポート"
-        self._log_safe(f"  投稿を検索: 「{report_title}」")
-        post = self.wp_client.search_post_by_title(
-            report_title, log_func=self._log_safe
-        )
+        # --- 2. 投稿タイトルの日付を決定（PDFファイル名から抽出） ---
+        date_str = None
+        for f in files:
+            m = re.search(r"(\d{4})(\d{2})(\d{2})", f.name)
+            if m:
+                date_str = f"{m.group(1)}年{int(m.group(2))}月{int(m.group(3))}日"
+                break
+        if not date_str:
+            now = datetime.now()
+            date_str = f"{now.year}年{now.month}月{now.day}日"
 
-        if post:
-            post_id = post["id"]
-            try:
-                existing_content = self.wp_client.get_post_raw_content(post_id)
-            except Exception as e:
-                self._log_safe(f"  ⚠ rawコンテンツ取得失敗、空として続行: {e}")
-                existing_content = ""
-            self._log_safe(f"  既存コンテンツ取得完了 ({len(existing_content)}文字)")
+        # 投稿タイトル: "[カテゴリー]ウィークリーレポート [日付]号"
+        post_title = f"{self.detected_category}ウィークリーレポート {date_str}号"
+        self._log_safe(f"  新規投稿タイトル: {post_title}")
 
-            # --- 3. 既存コンテンツを解析して再構成 ---
-            new_content = self._restructure_content(
-                existing_content, new_blocks
-            )
+        # --- 3. アイキャッチ画像をメディアライブラリから検索 ---
+        # 例: "全固体電池ウィークリーレポート" にマッチする画像を探す
+        eyecatch_id: int | None = None
+        for search_kw in [
+            f"{self.detected_category}ウィークリーレポート",
+            f"{self.detected_category}WeeklyReport",
+            "ウィークリーレポート",
+            "WeeklyReport",
+        ]:
+            self._log_safe(f"  アイキャッチ画像検索: 「{search_kw}」")
+            eyecatch_id = self.wp_client.search_media_by_keyword(search_kw)
+            if eyecatch_id:
+                self._log_safe(f"  アイキャッチ画像 ID: {eyecatch_id}")
+                break
+        if not eyecatch_id:
+            self._log_safe("  ⚠ アイキャッチ画像が見つかりませんでした（なしで続行）")
 
-            result = self.wp_client.update_post(
-                post_id, new_content, bump_to_top=True
-            )
-            self._log_safe(
-                f"  ✓ 投稿を更新しました (ID: {post_id})"
-                f" status={result.get('status','?')}"
-                f" sticky={result.get('sticky','?')}"
-                f" date={result.get('date','?')}"
-                f" date_gmt={result.get('date_gmt','?')}"
+        # --- 4. カテゴリーIDを取得 ---
+        category_ids: list[int] = []
+        parent_cat_id: int | None = None
+        if self.detected_category:
+            parent_cat_id = self.wp_client.get_or_create_category(self.detected_category)
+            if parent_cat_id:
+                category_ids.append(parent_cat_id)
+                self._log_safe(
+                    f"  親カテゴリー: {self.detected_category} (ID: {parent_cat_id})"
+                )
+
+        # 子カテゴリー「最新のトピック（1週間）」を親カテゴリーの子として取得
+        weekly_cat_name = "最新のトピック（1週間）"
+        weekly_cat_id: int | None = None
+        if parent_cat_id:
+            weekly_cat_id = self.wp_client.get_or_create_category(
+                weekly_cat_name, parent_id=parent_cat_id
             )
         else:
+            weekly_cat_id = self.wp_client.get_or_create_category(weekly_cat_name)
+        if weekly_cat_id:
+            category_ids.append(weekly_cat_id)
             self._log_safe(
-                f"  投稿「{report_title}」が見つかりません。新規公開投稿として作成します。"
+                f"  子カテゴリー: {weekly_cat_name} (ID: {weekly_cat_id})"
             )
-            try:
-                from datetime import timezone as _tz
-                now_utc = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
-                cat_id = self.wp_client.get_or_create_category(
-                    self.detected_category
-                )
-                content = "\n".join(new_blocks)
-                new_post = self.wp_client.create_post(
-                    title=report_title,
-                    content=content,
-                    category_ids=[cat_id] if cat_id else None,
-                    status="publish",   # 公開状態で作成（draft だと一覧に出ない）
-                    sticky=True,        # 先頭固定表示
-                    date_gmt=now_utc,   # 現在時刻を設定してトップへ
-                )
-                new_id = new_post.get("id", "?")
+
+        # --- 5. 新規投稿を作成 ---
+        try:
+            from datetime import timezone as _tz
+            now_utc = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            content = "\n".join(new_blocks)
+            new_post = self.wp_client.create_post(
+                title=post_title,
+                content=content,
+                featured_media_id=eyecatch_id,
+                category_ids=category_ids if category_ids else None,
+                status="publish",
+                sticky=True,
+                date_gmt=now_utc,
+            )
+            new_id = new_post.get("id", "?")
+            self._log_safe(
+                f"  ✓ 新規投稿を作成しました (ID: {new_id})"
+                f" status={new_post.get('status','?')}"
+                f" sticky={new_post.get('sticky','?')}"
+                f" date={new_post.get('date','?')}"
+                f" date_gmt={new_post.get('date_gmt','?')}"
+            )
+            # 作成後にトップ移動を別コールで確実に適用
+            if isinstance(new_id, int):
+                bump = self.wp_client.bump_to_top(new_id)
                 self._log_safe(
-                    f"  ✓ 新規投稿を作成しました (ID: {new_id})"
-                    f" status={new_post.get('status','?')}"
-                    f" sticky={new_post.get('sticky','?')}"
-                    f" date={new_post.get('date','?')}"
-                    f" date_gmt={new_post.get('date_gmt','?')}"
+                    f"  ✓ トップ移動適用 sticky={bump.get('sticky','?')}"
+                    f" date={bump.get('date','?')}"
                 )
-                # 新規作成後もトップ移動を別コールで確実に適用
-                if isinstance(new_id, int):
-                    bump = self.wp_client.bump_to_top(new_id)
-                    self._log_safe(
-                        f"  ✓ トップ移動適用 sticky={bump.get('sticky','?')}"
-                        f" date={bump.get('date','?')}"
-                    )
-            except Exception as e:
-                self._log_safe(f"  ✗ 新規投稿の作成に失敗: {e}")
+        except Exception as e:
+            self._log_safe(f"  ✗ 新規投稿の作成に失敗: {e}")
 
     def _restructure_content(
         self, existing_content: str, new_blocks: list[str]
