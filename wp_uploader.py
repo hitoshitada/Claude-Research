@@ -2,10 +2,13 @@
 
 調査アウトプットフォルダのHTMLファイルをWordPressに自動投稿する。
 - フォルダ選択 → Chrome表示 → 閲覧完了 → アップロード判定
-- 既存画像 or Gemini AI生成画像をアイキャッチに設定
+- article_curator.py で確定した _eyecatch.png/jpg をアイキャッチとして使用
+- 不採用_で始まるファイルは自動スキップ
 - 概要・詳細を緑帯ヘッダー付きで投稿
+- sys.argv[1] でフォルダを指定可能（pipeline_launcher.py 連携）
 """
 
+import sys
 import io
 import os
 import re
@@ -1196,16 +1199,19 @@ class WPUploaderApp(tk.Tk):
         )
         if not folder:
             return
+        self._load_folder_path(Path(folder))
 
-        folder_path = Path(folder)
+    def _load_folder_path(self, folder_path: Path):
+        """フォルダを読み込む（ファイル選択ダイアログ不要版）"""
         self.selected_folder = folder_path
         self.folder_label.config(text=folder_path.name, foreground="black")
 
-        # HTMLファイル取得（概要ファイルを除外、ソート済み）
+        # HTMLファイル取得（概要ファイル・不採用ファイルを除外、ソート済み）
         self.html_files = sorted(
             f
             for f in folder_path.glob("*.html")
             if not f.name.endswith("_概要.html")
+            and not f.name.startswith("不採用_")
         )
 
         count = len(self.html_files)
@@ -1351,8 +1357,34 @@ class WPUploaderApp(tk.Tk):
             self._enable_buttons()
             return
 
-        # 写真の選択
-        self._ask_photo_choice()
+        # アイキャッチ画像の優先順位:
+        # 1. {stem}_eyecatch.png/jpg （article_curator.py が生成）
+        # 2. 通常の画像選択ダイアログ（_ask_photo_choice）
+        filepath = self.current_article["filepath"]
+        eyecatch_path = self._find_eyecatch_file(filepath)
+        if eyecatch_path:
+            self._log(f"アイキャッチ画像を使用: {eyecatch_path.name}")
+            self._upload_with_eyecatch_file(eyecatch_path)
+        else:
+            self._log("アイキャッチ画像なし → 画像選択ダイアログを表示")
+            self._ask_photo_choice()
+
+    def _find_eyecatch_file(self, html_path: Path) -> "Path | None":
+        """記事HTMLに対応する _eyecatch.png/jpg を探す"""
+        for ext in [".png", ".jpg", ".jpeg"]:
+            candidate = html_path.parent / f"{html_path.stem}_eyecatch{ext}"
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _upload_with_eyecatch_file(self, eyecatch_path: Path):
+        """アイキャッチファイルを直接アップロード"""
+        self._log(f"アイキャッチ画像をアップロード中: {eyecatch_path.name}")
+        ext = eyecatch_path.suffix.lower()
+        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+        mime = mime_map.get(ext, "image/png")
+        image_data = eyecatch_path.read_bytes()
+        self._do_wp_upload(image_data, eyecatch_path.name, mime)
 
     def _ask_photo_choice(self):
         """アイキャッチ画像の選択（4択ダイアログ）"""
@@ -2052,6 +2084,28 @@ class WPUploaderApp(tk.Tk):
             file_type = "PDF" if f.suffix.lower() == ".pdf" else "ポッドキャスト"
             self._log(f"{file_type}ファイル検出: {f.name}")
 
+        # ポッドキャストのレビュー状態チェック
+        if self.selected_folder and mp3_files:
+            review_state_path = self.selected_folder / "_review_work" / "_review_state.json"
+            if review_state_path.exists():
+                try:
+                    import json as _json
+                    rs = _json.loads(review_state_path.read_text(encoding="utf-8"))
+                    if rs.get("status") not in ("reviewed",):
+                        warn_proceed = messagebox.askyesno(
+                            "ポッドキャストレビュー未完了",
+                            "ポッドキャストのレビューが完了していません。\n"
+                            f"（状態: {rs.get('status', 'unreviewed')}）\n\n"
+                            "レビュー未完了のまま続行しますか？",
+                            icon="warning",
+                        )
+                        if not warn_proceed:
+                            self._log("→ ポッドキャストレビュー未完了のためキャンセル")
+                            self._finish_all()
+                            return
+                except Exception:
+                    pass
+
         # 確認ダイアログ
         file_names = "\n".join(f"  ・{f.name}" for f in upload_files)
         proceed = messagebox.askyesno(
@@ -2472,6 +2526,13 @@ class WPUploaderApp(tk.Tk):
 # =====================================================================
 def main():
     app = WPUploaderApp()
+
+    # sys.argv[1] があればフォルダ選択をスキップ
+    if len(sys.argv) > 1:
+        p = Path(sys.argv[1])
+        if p.is_dir():
+            app.after(200, lambda: app._load_folder_path(p))
+
     app.mainloop()
 
 

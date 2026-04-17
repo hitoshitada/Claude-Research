@@ -3,8 +3,10 @@
 - 生成済みポッドキャストを再生し、修正点を入力
 - 修正部分だけ再生成 → 前後10秒を再生して確認
 - 修正内容を修正ログに蓄積（本体のポッドキャスト生成で参照）
+- 中断・再開機能、バージョン管理、レビュー完了管理
 """
 
+import sys
 import os
 import re
 import subprocess
@@ -12,6 +14,7 @@ import threading
 import time
 import shutil
 import hashlib
+import json
 from pathlib import Path
 from datetime import datetime
 from tkinter import (
@@ -21,6 +24,9 @@ from tkinter import (
     VERTICAL, HORIZONTAL, WORD, SINGLE,
 )
 from tkinter import ttk
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 # ─── 定数 ───
 BASE_DIR = Path(r"C:\Users\hitos\OneDrive\AI関連\DeepResearchをつかった情報調査")
@@ -466,6 +472,30 @@ class PodcastReviewerApp:
                                   command=self._finish)
         self.btn_finish.pack(side=RIGHT, padx=3)
 
+        # レビュー完了・バージョン管理ボタン
+        review_frame = ttk.LabelFrame(root, text="レビュー管理", padding=5)
+        review_frame.pack(fill=X, padx=10, pady=(0, 4))
+
+        review_btn_row = Frame(review_frame)
+        review_btn_row.pack(fill=X)
+
+        self.btn_review_complete = Button(
+            review_btn_row, text="レビュー完了 ✓", font=("Meiryo UI", 10, "bold"),
+            bg="#2E7D32", fg="white", state=DISABLED,
+            command=self._complete_review)
+        self.btn_review_complete.pack(side=LEFT, padx=3)
+
+        self.btn_save_version = Button(
+            review_btn_row, text="バージョン保存", font=("Meiryo UI", 10),
+            bg="#0277BD", fg="white", state=DISABLED,
+            command=self._save_version)
+        self.btn_save_version.pack(side=LEFT, padx=3)
+
+        self.review_status_label = Label(
+            review_frame, text="[未レビュー]",
+            font=("Meiryo UI", 10, "bold"), fg="#9E9E9E")
+        self.review_status_label.pack(side=LEFT, padx=8)
+
         # ===== ステータス =====
         status_frame = ttk.LabelFrame(root, text="ステータス", padding=5)
         status_frame.pack(fill=X, padx=10, pady=(0, 10))
@@ -559,6 +589,13 @@ class PodcastReviewerApp:
 
         # WAV初期化をバックグラウンドで実行（修正機能用）
         threading.Thread(target=self._initialize_wavs, daemon=True).start()
+
+        # レビュー管理ボタンを有効化
+        self.btn_review_complete.config(state=NORMAL)
+        self.btn_save_version.config(state=NORMAL)
+
+        # レビュー状態を適用（タイトル更新・シーク位置復元）
+        self.root.after(200, self._apply_review_state_after_load)
 
     def _display_script(self):
         """原稿テキストを色分けして表示し、セグメント→文字位置マップを構築"""
@@ -1685,10 +1722,225 @@ class PodcastReviewerApp:
 
         self.root.destroy()
 
+    # ─────────────────────────────────────────────────────────────────
+    # 中断・再開機能 / バージョン管理 / レビュー完了管理
+    # ─────────────────────────────────────────────────────────────────
+
+    def _get_review_state_path(self) -> Path | None:
+        """レビュー状態ファイルのパスを返す"""
+        if self.work_dir is None:
+            if self.selected_folder:
+                return self.selected_folder / "_review_work" / "_review_state.json"
+        else:
+            return self.work_dir / "_review_state.json"
+        return None
+
+    def _load_review_state(self) -> dict:
+        """_review_state.json を読み込む。なければ初期値を返す"""
+        path = self._get_review_state_path()
+        if path and path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {
+            "status": "unreviewed",
+            "review_count": 0,
+            "last_position_sec": 0.0,
+            "last_reviewed": None,
+            "versions": [],
+        }
+
+    def _save_review_state(self, review_state: dict):
+        """_review_state.json に保存"""
+        path = self._get_review_state_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(review_state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # _pipeline_state.json も更新
+        if self.selected_folder:
+            self._update_pipeline_state(review_state)
+
+    def _update_pipeline_state(self, review_state: dict):
+        """_pipeline_state.json の podcast_review セクションを更新"""
+        state_file = self.selected_folder / "_pipeline_state.json"
+        try:
+            if state_file.exists():
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            else:
+                state = {"folder": self.selected_folder.name,
+                         "created": datetime.now().isoformat(timespec="seconds"),
+                         "stages": {}}
+            pr = state.setdefault("stages", {}).setdefault("podcast_review", {})
+            pr["status"] = review_state.get("status", "unreviewed")
+            pr["review_count"] = review_state.get("review_count", 0)
+            pr["last_position_sec"] = review_state.get("last_position_sec", 0.0)
+            if review_state.get("status") == "reviewed":
+                pr["completed_at"] = datetime.now().isoformat(timespec="seconds")
+            state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _apply_review_state_after_load(self):
+        """フォルダ読み込み後にレビュー状態を適用し、タイトルとUIを更新"""
+        review_state = self._load_review_state()
+        status = review_state.get("status", "unreviewed")
+        review_count = review_state.get("review_count", 0)
+        last_pos = review_state.get("last_position_sec", 0.0)
+
+        # ウィンドウタイトルとステータスバーを更新
+        status_text = self._get_review_status_text(status, review_count, last_pos)
+        self.root.title(f"ポッドキャスト レビュー＆修正ツール  {status_text}")
+        self.status_var.set(status_text)
+
+        # 初回起動ならオリジナルバックアップを作成
+        if self.mp3_path and self.mp3_path.exists():
+            original_path = self.mp3_path.parent / f"{self.mp3_path.stem}_original.mp3"
+            if not original_path.exists():
+                shutil.copy2(self.mp3_path, original_path)
+                self.status_var.set(f"原版バックアップを作成しました: {original_path.name}")
+
+        # last_position_sec があればシークバーを設定
+        if last_pos > 0 and self.total_duration > 0:
+            seek_pos = min(last_pos, self.total_duration)
+            self.seek_var.set(seek_pos)
+            self.time_label.config(text=format_time(seek_pos))
+
+        # レビュー完了・バージョン保存・再レビューボタンを有効化
+        self._update_review_buttons(status)
+
+    def _get_review_status_text(self, status: str, review_count: int, last_pos: float) -> str:
+        if status == "reviewed":
+            return f"[レビュー済 ✓ ({review_count}回)]"
+        elif status == "in_progress":
+            mins, secs = int(last_pos) // 60, int(last_pos) % 60
+            return f"[レビュー中 - 前回: {mins}分{secs:02d}秒]"
+        else:
+            return "[未レビュー]"
+
+    def _update_review_buttons(self, status: str):
+        """レビュー状態に応じてボタンの表示を更新"""
+        if hasattr(self, "btn_review_complete"):
+            if status == "reviewed":
+                self.btn_review_complete.config(text="再レビュー開始", bg="#FF6F00",
+                                                 command=self._start_re_review)
+            else:
+                self.btn_review_complete.config(text="レビュー完了 ✓", bg="#2E7D32",
+                                                 command=self._complete_review)
+
+    def _complete_review(self):
+        """レビュー完了を記録"""
+        review_state = self._load_review_state()
+        review_state["status"] = "reviewed"
+        review_state["review_count"] = review_state.get("review_count", 0) + 1
+        review_state["last_reviewed"] = datetime.now().isoformat(timespec="seconds")
+        current_pos = self.seek_var.get()
+        review_state["last_position_sec"] = current_pos
+        self._save_review_state(review_state)
+
+        self._update_review_buttons("reviewed")
+        self.root.title(f"ポッドキャスト レビュー＆修正ツール  "
+                        f"[レビュー済 ✓ ({review_state['review_count']}回)]")
+        self.status_var.set(f"レビュー完了！（{review_state['review_count']}回目）"
+                            f" _review_state.json に保存しました")
+
+    def _start_re_review(self):
+        """再レビューを開始（ステータスを in_progress に戻す）"""
+        review_state = self._load_review_state()
+        review_state["status"] = "in_progress"
+        self._save_review_state(review_state)
+        self._update_review_buttons("in_progress")
+        self.root.title(f"ポッドキャスト レビュー＆修正ツール  [再レビュー中]")
+        self.status_var.set("再レビューを開始しました")
+
+    def _save_version(self):
+        """現在のMP3をバージョンとして保存"""
+        if not self.mp3_path or not self.mp3_path.exists():
+            messagebox.showwarning("エラー", "MP3ファイルが見つかりません")
+            return
+
+        review_state = self._load_review_state()
+        versions = review_state.get("versions", [])
+        n = len(versions) + 1
+        version_path = self.mp3_path.parent / f"{self.mp3_path.stem}_v{n}.mp3"
+
+        try:
+            shutil.copy2(self.mp3_path, version_path)
+            versions.append({
+                "version": n,
+                "path": str(version_path),
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+            })
+            review_state["versions"] = versions
+            self._save_review_state(review_state)
+            self.status_var.set(f"バージョン v{n} を保存しました: {version_path.name}")
+        except Exception as e:
+            messagebox.showerror("エラー", f"バージョン保存に失敗しました:\n{e}")
+
+    def _save_position_and_close(self):
+        """現在位置を保存して閉じる"""
+        if not self.selected_folder:
+            self._finish()
+            return
+
+        if not messagebox.askyesno("終了確認", "現在位置を保存して閉じますか？"):
+            return
+
+        # 現在位置を保存
+        review_state = self._load_review_state()
+        current_pos = self.seek_var.get()
+        review_state["last_position_sec"] = current_pos
+        if review_state.get("status") == "unreviewed":
+            review_state["status"] = "in_progress"
+        self._save_review_state(review_state)
+
+        self._stop_playback()
+        # 作業ディレクトリの削除確認
+        if self.work_dir and self.work_dir.exists():
+            if messagebox.askyesno("WAV削除確認",
+                    "作業用WAVファイルを削除しますか？\n"
+                    "（「いいえ」を選ぶと次回の読み込みが高速になります）"):
+                shutil.rmtree(self.work_dir, ignore_errors=True)
+
+        self.root.destroy()
+
     def run(self):
         self.root.mainloop()
 
 
 if __name__ == "__main__":
+    import sys as _sys
+
+    # フォルダ引数の処理
+    initial_folder = None
+    if len(_sys.argv) > 1:
+        p = Path(_sys.argv[1])
+        if p.is_dir():
+            initial_folder = p
+
     app = PodcastReviewerApp()
+
+    if initial_folder:
+        # フォルダ一覧からマッチするものを選択
+        OUTPUT_DIR_CHECK = Path(r"C:\Users\hitos\OneDrive\AI関連\DeepResearchをつかった情報調査\調査アウトプット")
+        if initial_folder.parent == OUTPUT_DIR_CHECK:
+            # リストボックスから選択
+            folders = list(app.folder_listbox.get(0, END))
+            if initial_folder.name in folders:
+                idx = folders.index(initial_folder.name)
+                app.folder_listbox.selection_set(idx)
+                app.folder_listbox.see(idx)
+                app.root.after(200, app._on_folder_select)
+
+    # ウィンドウを閉じる際に現在位置を保存
+    def _on_close():
+        if app.mp3_path and app.selected_folder:
+            app._save_position_and_close()
+        else:
+            app.root.destroy()
+
+    app.root.protocol("WM_DELETE_WINDOW", _on_close)
+
     app.run()
