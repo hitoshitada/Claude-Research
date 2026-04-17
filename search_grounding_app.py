@@ -166,7 +166,15 @@ class SearchGroundingApp:
         if not INVESTIGATION_DIR.exists():
             INVESTIGATION_DIR.mkdir(parents=True, exist_ok=True)
 
-        txt_files = sorted(INVESTIGATION_DIR.glob("*.txt"))
+        # 情報調査用ファイルのみ表示（プロンプト設定ファイルは除外）
+        # 除外対象: *_podcast_prompt.txt / *_report_prompt.txt / 共通_*.txt
+        txt_files = sorted(
+            f for f in INVESTIGATION_DIR.glob("*.txt")
+            if not any(f.name.endswith(suffix) for suffix in (
+                "_podcast_prompt.txt", "_report_prompt.txt"
+            ))
+            and not f.name.startswith("共通_")
+        )
 
         if not txt_files:
             ttk.Label(self.file_list_frame,
