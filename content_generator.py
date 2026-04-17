@@ -200,10 +200,26 @@ def load_report_prompt(topic_name: str) -> str:
 
 
 def load_podcast_prompt(topic_name: str) -> str:
+    """トピック固有プロンプト + 共通ルールを結合して返す。
+
+    読み込み優先順:
+      1. {topic}_podcast_prompt.txt  （トピック固有・存在すれば使用）
+      2. DEFAULT_PODCAST_PROMPT      （ファイルなし時のフォールバック）
+    その後、共通_podcast_rules.txt を末尾に追加する（存在する場合）。
+    """
     prompt_file = BASE_DIR / "調査内容ファイル" / f"{topic_name}_podcast_prompt.txt"
-    if prompt_file.exists():
-        return prompt_file.read_text(encoding="utf-8")
-    return DEFAULT_PODCAST_PROMPT
+    base_prompt = (
+        prompt_file.read_text(encoding="utf-8")
+        if prompt_file.exists()
+        else DEFAULT_PODCAST_PROMPT
+    )
+
+    # 共通ルールを末尾に追加
+    common_rules_file = BASE_DIR / "調査内容ファイル" / "共通_podcast_rules.txt"
+    if common_rules_file.exists():
+        common_rules = common_rules_file.read_text(encoding="utf-8")
+        return base_prompt.rstrip() + "\n\n" + common_rules
+    return base_prompt
 
 
 # ─── Gemini API呼び出し ───
