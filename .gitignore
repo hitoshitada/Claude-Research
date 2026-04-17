@@ -62,3 +62,7 @@ _ul
 # ========================================
 _make_test_video.py
 _test_sentence_pause.py
+
+# WPメディアライブラリキャッシュ（大量画像）
+画像ファイル/
+test_*.py

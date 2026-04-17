@@ -1,12 +1,25 @@
-細胞培養技術（cell culture technology）に関する最新の記事・論文・プレスリリース。
-検索キーワード: cell culture, bioreactor, cell therapy manufacturing, single-use bioreactor, 3D cell culture, scaffold, suspension culture, cell culture media, GMP manufacturing, continuous bioprocessing
-対象トピック:
-① シングルユースバイオリアクターの最新技術（バッグ素材、センサー統合、スケールアップ）
-② 3D細胞培養技術の進展（スフェロイド、オルガノイド、足場材料、ハイドロゲル、マイクロキャリア）
-③ 細胞治療の商業化製造技術（自動培養、閉鎖系プロセス、クリーンルーム革新）
-④ 培地技術の革新（無血清培地、化学組成培地、培地リサイクル技術）
-⑤ 連続バイオプロセシング（灌流培養、インライン精製、PAT）
-⑥ 主要企業動向（Sartorius, Thermo Fisher, Cytiva, Merck, Eppendorf, Corning等）
-⑦ Organ-on-a-chip・マイクロ流体デバイスの培養応用
-⑧ 培養肉・細胞農業向けの大規模培養技術
-⑨ 品質管理の自動化（リアルタイムモニタリング、AI活用、プロセス分析）
+細胞培養技術・バイオプロセス（cell culture / bioprocessing）に関する最新のニュース・プレスリリース・業界動向。
+
+検索キーワード（英語ニュース向け）:
+cell culture technology, bioprocessing, single-use bioreactor, CGT manufacturing, cell and gene therapy manufacturing, continuous bioprocessing, perfusion bioreactor, 3D cell culture, organoid culture, cell culture media, serum-free media, GMP upstream processing, mRNA manufacturing platform, bioreactor scale-up, microcarrier, hollow fiber bioreactor
+
+検索キーワード（企業・ブランド名）:
+Sartorius Stedim Biotech, Cytiva bioprocessing, Thermo Fisher HyClone, Merck Millipore, Eppendorf bioreactor, Corning Life Sciences, Lonza biologics, Rentschler Biopharma, Samsung Biologics CDMO, WuXi Biologics, Fujifilm Diosynth, AGC Biologics
+
+検索キーワード（日本語・アジア向け）:
+バイオリアクター 新製品, 細胞培養 バイオプロセス, 細胞治療 製造 CDMO, 遺伝子治療 製造受託, バイオ医薬品 上流工程, シングルユース 培養, 培養肉 大規模生産, 無血清培地 開発, 連続生産 灌流培養, 再生医療 製造技術
+
+対象トピック（ニュース量が多い順）:
+① 細胞・遺伝子治療（CGT）製造プラットフォームの新技術・パートナーシップ・施設投資
+   （CAR-T, AAV, レンチウイルスベクター, 同種異系細胞治療の製造受託含む）
+② バイオ医薬品CDMO（受託製造）の設備投資・M&A・新契約・FDA/EMA承認
+   （Lonza, Samsung Biologics, Fujifilm, AGC, WuXi, Rentschler等）
+③ シングルユースバイオリアクターの新製品・性能向上・展示会発表
+   （Sartorius Biostat, Cytiva Xcellerex, Thermo Fisher HyPerforma等）
+④ mRNA・ウイルスベクター向け上流プロセス（培地・培養条件・スケールアップ）の研究成果
+⑤ 連続バイオプロセシング（灌流培養・Periodic Counter-Current）の実装事例・規制対応
+⑥ 3D細胞培養・オルガノイド・スフェロイド技術の研究発表と商業化動向
+⑦ 培養肉（cultivated meat）・細胞農業の大規模生産技術と規制承認・スタートアップ資金調達
+⑧ プロセス分析技術（PAT）・デジタルツイン・AI活用による培養プロセス最適化
+⑨ 無血清培地・化学組成培地（CDM）の新製品発売・ライセンス契約
+⑩ 主要メーカー（Sartorius, Cytiva等）の決算発表・新製品ローンチ・戦略的提携
