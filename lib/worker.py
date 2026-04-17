@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from google import genai
-from .config import INVESTIGATION_DIR, IMAGE_WORKERS, STRUCTURING_MODEL, build_summary_prompt
+from .config import INVESTIGATION_DIR, IMAGE_WORKERS
 from .search_grounding_client import create_client, search_articles, ResearchResult
 from .article_parser import (
     Article,
@@ -29,9 +29,8 @@ from .html_generator import (
     save_summary_html,
     SavedArticleInfo,
 )
-from .pdf_generator import generate_combined_pdf
-from .podcast_generator import generate_podcast
-from .weekly_report_generator import generate_weekly_report
+# generate_combined_pdf / generate_podcast / generate_weekly_report は
+# Stage3（content_generator.py）で実行するため、ここではインポートしない
 
 
 @dataclass
@@ -270,127 +269,20 @@ class ResearchWorker:
             except Exception as e:
                 self._send("error", f"概要一覧の保存に失敗: {str(e)}", topic=topic_name)
 
-        # Step 8: ウィークリーサマリーを生成（Gemini）
-        summary_data = None
-        if articles:
-            self._send("status", "ウィークリーサマリーを生成中...", topic=topic_name)
-            self._send("log", "Geminiで今週の動向サマリーを生成中...", topic=topic_name)
-            try:
-                summary_data = self._generate_weekly_summary(
-                    client, articles, topic_name
-                )
-                self._send("log", "サマリー生成完了", topic=topic_name)
-            except Exception as e:
-                self._send("error", f"サマリー生成に失敗（PDFにはサマリーなしで続行）: {str(e)}", topic=topic_name)
-
-        # Step 9: 統合PDFを生成
-        if articles:
-            self._send("status", "統合PDFを生成中...", topic=topic_name)
-            try:
-                pdf_path = generate_combined_pdf(
-                    articles=articles,
-                    topic_name=topic_name,
-                    output_folder=output_folder,
-                    collection_date=collection_date,
-                    summary_data=summary_data,
-                )
-                self._send("log", f"統合PDFを保存: {pdf_path.name}", topic=topic_name)
-            except Exception as e:
-                self._send("error", f"PDF生成に失敗: {str(e)}", topic=topic_name)
-
-        # Step 9.5: Weekly Intelligence Report (フロントレポート) を生成
-        if articles:
-            self._send("status", "Weekly Intelligence Report 生成中...", topic=topic_name)
-            try:
-                # 既存の記事PDF (Step 9 で生成) をフロントレポートと連結
-                existing_pdf = pdf_path if 'pdf_path' in locals() else None
-
-                def wr_progress(msg: str):
-                    self._send("status", f"WeeklyReport: {msg}", topic=topic_name)
-                    self._send("log", f"  [WeeklyReport] {msg}", topic=topic_name)
-
-                wr_path = generate_weekly_report(
-                    client=client,
-                    articles=articles,
-                    topic_name=topic_name,
-                    output_folder=output_folder,
-                    collection_date=collection_date,
-                    existing_articles_pdf=existing_pdf,
-                    progress_callback=wr_progress,
-                )
-                self._send("log", f"WeeklyReport保存: {wr_path.name}", topic=topic_name)
-            except Exception as e:
-                self._send("error", f"WeeklyReport生成に失敗: {str(e)}", topic=topic_name)
-
-        # Step 10: ポッドキャス��音声を生成
-        if articles:
-            self._send("status", "ポッドキャスト音声を生成中...", topic=topic_name)
-            self._send("log", "ポッドキ���スト生成を開始...", topic=topic_name)
-            try:
-                date_str = datetime.now().strftime("%Y%m%d")
-
-                def podcast_progress(msg: str):
-                    self._send("status", f"ポッドキャスト: {msg}", topic=topic_name)
-                    self._send("log", f"  [Podcast] {msg}", topic=topic_name)
-
-                podcast_path = generate_podcast(
-                    client=client,
-                    articles=articles,
-                    topic_name=topic_name,
-                    output_folder=output_folder,
-                    date_str=date_str,
-                    progress_callback=podcast_progress,
-                )
-                if podcast_path:
-                    self._send("log", f"ポッドキャスト保存: {podcast_path.name}", topic=topic_name)
-                else:
-                    self._send("log", "ポッドキャスト生成をスキップしました", topic=topic_name)
-            except Exception as e:
-                self._send("error", f"ポッドキャスト生成に失敗: {str(e)}", topic=topic_name)
+        # ※ WeeklyReport・ポッドキャスト生成はここでは行わない
+        # → 記事選別（Stage2: article_curator.py）の後に
+        #   Stage3（content_generator.py）で採用記事のみを対象に実行する
 
         self._send("log", f"", topic=topic_name)
         self._send(
             "log",
-            f"完了: {saved_count}件のHTML + PDF + Podcast -> {output_folder.name}/",
+            f"完了: {saved_count}件のHTMLを保存 -> {output_folder.name}/",
+            topic=topic_name,
+        )
+        self._send(
+            "log",
+            f"次のステップ: article_curator.py で記事を選別してください",
             topic=topic_name,
         )
 
-    def _generate_weekly_summary(
-        self,
-        client: genai.Client,
-        articles: list[Article],
-        topic_name: str,
-    ) -> dict:
-        """全記事を分析してウィークリーサマリーを生成する"""
-        # 記事一覧テキストを構築
-        articles_text_parts = []
-        countries = set()
-        for idx, a in enumerate(articles):
-            countries.add(a.country or "不明")
-            articles_text_parts.append(
-                f"### #{idx + 1:02d} {a.title_ja}\n"
-                f"- 出典: {a.source_name} ({a.country})\n"
-                f"- 日付: {a.publish_date}\n"
-                f"- 概要: {a.summary_ja}\n"
-            )
-        articles_text = "\n".join(articles_text_parts)
-
-        # プロンプト構築
-        prompt = build_summary_prompt(topic_name) + articles_text
-
-        # Gemini APIで生成
-        response = client.models.generate_content(
-            model=STRUCTURING_MODEL,
-            contents=prompt,
-            config={"response_mime_type": "application/json"},
-        )
-
-        result = json.loads(response.text)
-
-        # statsを補完
-        if "stats" not in result:
-            result["stats"] = {}
-        result["stats"]["total_articles"] = len(articles)
-        result["stats"]["countries"] = len(countries)
-
-        return result
+    # _generate_weekly_summary は Stage3（content_generator.py）に移行
