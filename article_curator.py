@@ -616,6 +616,10 @@ class ArticleCuratorApp:
         # アイキャッチ画像を確定・保存
         eyecatch_path = self._save_eyecatch_image(filepath)
 
+        # HTMLのタイトル直下（概要の上）の画像をアイキャッチで置き換え
+        if eyecatch_path:
+            self._embed_eyecatch_in_html(filepath, eyecatch_path)
+
         # 状態更新
         curation = self.pipeline_state["stages"]["curation"]
         curation.setdefault("articles", {})[filepath.name] = "adopted"
@@ -658,6 +662,63 @@ class ArticleCuratorApp:
         except Exception as e:
             self.status_label.config(text=f"画像保存失敗: {e}")
             return None
+
+    def _embed_eyecatch_in_html(self, html_path: Path, eyecatch_path: Path) -> bool:
+        """HTMLのタイトルと概要の間にアイキャッチ画像を埋め込む（既存画像は置き換え）。
+
+        ・.article-image img が存在すれば src をローカルパスに差し替え
+        ・.article-image が存在しなければ .header の直後に挿入
+        ・いずれの場合も onerror 属性は除去し、ローカルファイル参照に統一
+        """
+        BS = get_bs4()
+        if BS is None:
+            return False
+        try:
+            html_text = html_path.read_text(encoding="utf-8")
+            soup = BS(html_text, "html.parser")
+
+            # eyecatch の相対パス（HTML と同じフォルダ）
+            rel_src = eyecatch_path.name
+
+            existing_block = soup.select_one(".article-image")
+
+            if existing_block:
+                # --- 既存の .article-image ブロックを上書き ---
+                img_tag = existing_block.find("img")
+                if img_tag:
+                    img_tag["src"] = rel_src
+                    img_tag["alt"] = html_path.stem
+                    img_tag.attrs.pop("onerror", None)   # onerrorは不要
+                else:
+                    # imgタグがないブロックには新規追加
+                    new_img = soup.new_tag(
+                        "img", src=rel_src,
+                        alt=html_path.stem,
+                        style="max-width:100%;height:auto;max-height:400px;object-fit:cover;"
+                    )
+                    existing_block.clear()
+                    existing_block.append(new_img)
+            else:
+                # --- .article-image ブロックが存在しない → .header 直後に挿入 ---
+                header = soup.select_one(".header")
+                if header is None:
+                    return False
+
+                new_block = soup.new_tag("div", attrs={"class": "article-image"})
+                new_img = soup.new_tag(
+                    "img", src=rel_src,
+                    alt=html_path.stem,
+                    style="max-width:100%;height:auto;max-height:400px;object-fit:cover;"
+                )
+                new_block.append(new_img)
+                header.insert_after(new_block)
+
+            html_path.write_text(str(soup), encoding="utf-8")
+            return True
+
+        except Exception as e:
+            self.status_label.config(text=f"HTML画像埋め込み失敗: {e}")
+            return False
 
     # ─── 不採用処理 ───
 
