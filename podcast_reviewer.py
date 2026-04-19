@@ -1726,9 +1726,6 @@ class PodcastReviewerApp:
         old_text = self.entry_old.get().strip()
         new_text = self.entry_new.get().strip()
 
-        # 修正ログに保存
-        append_correction_log(self.topic_name, old_text, new_text)
-
         self._stop_playback()
 
         # シークバーを修正開始前の位置に戻す（▶再生でその場所から続きを聴けるように）
