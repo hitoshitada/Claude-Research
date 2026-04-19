@@ -2231,6 +2231,16 @@ class PodcastReviewerApp:
 
             self.segments = new_segments
 
+            # ── 全体修正ログへの記録 ──
+            # 変更されたセグメントのうちテキストが異なるものを修正ログに追記する。
+            # これにより次回の原稿生成時に Gemini が同じ誤りを繰り返さなくなる。
+            for _i in changed_indices:
+                if _i < len(old_segments) and _i < len(new_segments):
+                    _old_txt = old_segments[_i].get("text", "")
+                    _new_txt = new_segments[_i].get("text", "")
+                    if _old_txt != _new_txt:
+                        append_correction_log(self.topic_name, _old_txt, _new_txt)
+
             # seg_durations をサイズ調整
             while len(self.seg_durations) < len(self.segments):
                 self.seg_durations.append(3.0)

@@ -266,12 +266,14 @@ def load_report_prompt(topic_name: str) -> str:
 
 
 def load_podcast_prompt(topic_name: str) -> str:
-    """トピック固有プロンプト + 共通ルールを結合して返す。
+    """トピック固有プロンプト + 共通ルール + 修正ログを結合して返す。
 
     読み込み優先順:
       1. {topic}_podcast_prompt.txt  （トピック固有・存在すれば使用）
       2. DEFAULT_PODCAST_PROMPT      （ファイルなし時のフォールバック）
     その後、共通_podcast_rules.txt を末尾に追加する（存在する場合）。
+    さらに、ポッドキャスト修正ログ.txt が存在する場合は末尾に追加し、
+    同じ読み間違い・表現の問題を繰り返さないよう Gemini に伝える。
     """
     prompt_file = BASE_DIR / "調査内容ファイル" / f"{topic_name}_podcast_prompt.txt"
     base_prompt = (
@@ -284,7 +286,21 @@ def load_podcast_prompt(topic_name: str) -> str:
     common_rules_file = BASE_DIR / "調査内容ファイル" / "共通_podcast_rules.txt"
     if common_rules_file.exists():
         common_rules = common_rules_file.read_text(encoding="utf-8")
-        return base_prompt.rstrip() + "\n\n" + common_rules
+        base_prompt = base_prompt.rstrip() + "\n\n" + common_rules
+
+    # 修正ログを末尾に追加（過去の修正を参考に同じ誤りを繰り返さないため）
+    corrections_log_file = BASE_DIR / "ポッドキャスト修正ログ.txt"
+    if corrections_log_file.exists():
+        corrections = corrections_log_file.read_text(encoding="utf-8").strip()
+        # ヘッダー行だけの空ファイルは無視（有効なエントリが「---」で区切られる）
+        if "---" in corrections:
+            base_prompt = (
+                base_prompt.rstrip()
+                + "\n\n"
+                + "## 過去の修正ログ（必ずこの内容を参考にして、同じ誤りを繰り返さないこと）\n\n"
+                + corrections
+            )
+
     return base_prompt
 
 
