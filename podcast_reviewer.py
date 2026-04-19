@@ -38,8 +38,16 @@ NARRATOR_F = "Japanese Female 1"
 NARRATOR_M = "Japanese Male 1"
 SPEED = 100
 MAX_CHARS = 140
-MAX_RETRIES = 3
+MAX_RETRIES = 5          # 3回 → 5回に増強（たまの転機失敗を確実にカバー）
 RETRY_DELAY = 2.0
+MIN_WAV_BYTES = 2048     # 2KB未満のWAVは生成失敗扱い（破損/空ファイル対策）
+BASE_TIMEOUT_SEC = 90    # 60s → 90s（文末長めでも余裕を持たせる）
+
+# ハイライト同期 ─ ffplayの起動から実際に音が出るまでの遅延（秒）。
+# Pythonはプロセス開始と同時にタイマーを走らせるが、実際の音声出力は
+# OSのオーディオバッファ初期化後になる。これを elapsed から差し引くことで
+# ハイライトが音より前に進み過ぎるのを抑制する。
+FFPLAY_STARTUP_LATENCY_SEC = 0.25
 
 
 # ─── 共通ユーティリティ（podcast_generator.py と同じロジック） ───
@@ -68,9 +76,42 @@ def _smart_contains(text: str, word: str) -> bool:
     return word in text
 
 
+def _strip_speaker_markers_from_text(text: str) -> str:
+    """台詞テキスト中に混入した話者記号 F / M を除去する。
+
+    プロンプトリーク防止: Gemini が "ホストのF、スージーです" のように
+    内部マーカー F/M を台詞内に書き込んでしまった場合、VoicePeakに渡すと
+    「エフ」「エム」と読み上げられてしまうため、合成前に除去する。
+    """
+    if not text:
+        return text
+    # 「〜のF、」「〜のM、」などロール紹介パターン
+    text = re.sub(
+        r'(ホストの|ナビゲーターの|司会の|ナビの)\s*F[、,]\s*',
+        r'\1', text
+    )
+    text = re.sub(
+        r'(アナリストの|専門家の|ゲストの|解説者の|エンジニアの|エキスパートの)\s*M[、,]\s*',
+        r'\1', text
+    )
+    # 「スージー」「トロイ」直前に付いた F、 M、 を除去
+    text = re.sub(r'(?<![A-Za-z])F[、,]\s*(?=スージー)', '', text)
+    text = re.sub(r'(?<![A-Za-z])M[、,]\s*(?=トロイ)', '', text)
+    # 助詞＋F、 / 助詞＋M、 パターン（〜のF、スージー など）
+    text = re.sub(r'(の|は|が|、|。)\s*F[、,]\s*', r'\1', text)
+    text = re.sub(r'(の|は|が|、|。)\s*M[、,]\s*', r'\1', text)
+    # 文頭に残留した F、 M、
+    text = re.sub(r'^F[、,]\s*', '', text)
+    text = re.sub(r'^M[、,]\s*', '', text)
+    # 連続するスペース・全角空白を正規化
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    return text
+
+
 def parse_dialogue_script(text: str) -> list[dict]:
     """F:/M:形式の対話原稿をパース。
     感情タグ付き形式 F[H]: / M[N]: にも対応。感情タグを保持する。
+    台詞中に混入した話者記号 F/M は自動除去する。
     """
     # F: / F[TAG]: にマッチ。感情タグをキャプチャグループで取得
     pattern = re.compile(r'^([FM])(?:\[([A-Z]+)\])?[：:]\s*(.*)')
@@ -83,16 +124,22 @@ def parse_dialogue_script(text: str) -> list[dict]:
         if m:
             speaker = m.group(1)          # "F" or "M"
             emotion = m.group(2) or "N"   # "H", "E", "N" etc. デフォルトは "N"
-            content = m.group(3).strip()
+            content = _strip_speaker_markers_from_text(m.group(3).strip())
             lines.append({"speaker": speaker, "emotion": emotion, "text": content})
         else:
             if lines:
-                lines[-1]["text"] += line
+                lines[-1]["text"] += _strip_speaker_markers_from_text(line)
     return lines
 
 
 def split_long_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
-    """長いテキストをmax_chars以内に分割"""
+    """VoicePeakの文字数上限(max_chars=140)を守りつつテキストを分割する。
+
+    分割の優先順位:
+      1. 句点・感嘆符・疑問符（。！？）— 文末で分割（最も自然）
+      2. 読点・カンマ（、，）         — 文節で分割
+      3. 140字ハードカット              — 句読点がない超長フレーズの最終手段
+    """
     if len(text) <= max_chars:
         return [text]
     segments = []
@@ -106,6 +153,7 @@ def split_long_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
             if current:
                 segments.append(current)
                 current = ""
+            # 読点・カンマで再分割
             parts = re.split(r'(?<=[、，])', s)
             for p in parts:
                 if len(current) + len(p) <= max_chars:
@@ -113,6 +161,10 @@ def split_long_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
                 else:
                     if current:
                         segments.append(current)
+                    # 読点でも収まらない場合は max_chars でハードカット
+                    while len(p) > max_chars:
+                        segments.append(p[:max_chars])
+                        p = p[max_chars:]
                     current = p
         elif len(current) + len(s) <= max_chars:
             current += s
@@ -126,13 +178,24 @@ def split_long_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
 
 
 def build_segments(dialogue: list[dict]) -> list[dict]:
-    """対話リストをセグメント（speaker, emotion, text）のフラットリストに展開"""
+    """対話リストをセグメント（speaker, emotion, text）のフラットリストに展開。
+
+    1セグメント＝1文になるよう文末（。！？）で必ず分割する。
+    VoicePeakは複数文を1回の呼び出しで渡すと後半を切り捨てることがあるため、
+    文単位で分割することでその問題を防ぐ。
+    """
     segments = []
     for line in dialogue:
+        # まず最大文字数で分割（140字超の長文を先に分割）
         parts = split_long_text(line["text"])
         emotion = line.get("emotion", "N")
         for part in parts:
-            segments.append({"speaker": line["speaker"], "emotion": emotion, "text": part})
+            # さらに文末（。！？）で1文ずつに分割
+            sents = [s for s in re.split(r'(?<=[。！？])', part) if s.strip()]
+            if not sents:
+                sents = [part]
+            for sent in sents:
+                segments.append({"speaker": line["speaker"], "emotion": emotion, "text": sent})
     return segments
 
 
@@ -160,9 +223,61 @@ def _get_emotion_params(speaker: str, emotion: str) -> dict:
     }
 
 
+def _kill_stale_voicepeak() -> None:
+    """残留/ハング中のVoicePeakプロセスを強制終了する（次回生成を邪魔しないため）"""
+    try:
+        subprocess.run(["taskkill", "/im", "voicepeak.exe", "/f"],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+# ユーザー操作で「裏の合成を止めて前景処理を優先したい」場面で立てるフラグ。
+# generate_wav の内部リトライループがこれを見て即中断する。
+# threading.Event を使って、プロセス内のどこからでも signal できる。
+_cancel_ongoing_synthesis = threading.Event()
+
+
+def request_cancel_synthesis() -> None:
+    """進行中の音声合成をキャンセルし、VoicePeakも掃除する。"""
+    _cancel_ongoing_synthesis.set()
+    _kill_stale_voicepeak()
+
+
+def clear_cancel_synthesis() -> None:
+    """キャンセルフラグをクリアする（次回の合成を始める前に呼ぶ）。"""
+    _cancel_ongoing_synthesis.clear()
+
+
+def _is_valid_wav(path: Path) -> bool:
+    """WAVが実用可能な状態で書き出されているかを検証する。
+    単にファイル存在だけ見ると、空ファイル/ヘッダだけのファイルもOK扱いに
+    なってしまうため、最低サイズと再生時間の両方を確認する。
+    """
+    try:
+        if not path.exists():
+            return False
+        if path.stat().st_size < MIN_WAV_BYTES:
+            return False
+        # ffprobeで長さが取れるかで破損判定
+        dur = get_wav_duration(path)
+        if dur < 0.3:      # 0.3秒未満は実質無音/破損とみなす
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def generate_wav(text: str, narrator: str, output_path: Path,
                  speaker: str = "F", emotion: str = "N") -> bool:
-    """VoicePeakでWAV生成（リトライ付き、ハング対策あり）"""
+    """VoicePeakでWAV生成（リトライ付き、ハング対策あり、出力検証付き）。
+
+    - 各試行前に残留VoicePeakプロセスを掃除
+    - テキスト長に応じてタイムアウトを伸ばす
+    - 生成後はファイルサイズと再生時間で有効性を検証
+    - 壊れていたら次の試行でクリーンな状態から再生成
+    - 失敗時はstderrをログ出力（デバッグ用）
+    """
     ep = _get_emotion_params(speaker, emotion)
     cmd = [
         VOICEPEAK_EXE, "--say", text,
@@ -173,20 +288,74 @@ def generate_wav(text: str, narrator: str, output_path: Path,
     ]
     if ep["emotion"]:
         cmd += ["--emotion", ep["emotion"]]
+
+    # テキストが長いほどタイムアウトを伸ばす（1文字あたり約0.3秒 + 基本値）
+    timeout_sec = max(BASE_TIMEOUT_SEC, int(BASE_TIMEOUT_SEC + len(text) * 0.3))
+
+    last_err = ""
     for attempt in range(MAX_RETRIES):
+        # ユーザー操作によるキャンセルが来ていたら即終了
+        if _cancel_ongoing_synthesis.is_set():
+            return False
+
+        # 前回の失敗ファイルが残っていたら除去（破損WAVの再利用防止）
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=60)
-            if result.returncode == 0 and output_path.exists():
-                return True
-        except subprocess.TimeoutExpired:
-            # VoicePeakがハングした場合は強制終了
-            subprocess.run(["taskkill", "/im", "voicepeak.exe", "/f"],
-                          capture_output=True)
-            time.sleep(2)
+            if output_path.exists() and not _is_valid_wav(output_path):
+                output_path.unlink()
         except Exception:
             pass
+
+        # 試行前に残留プロセスを必ず掃除（ハング・ロック状態からの回復）
+        if attempt > 0:
+            _kill_stale_voicepeak()
+            time.sleep(0.5)
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=timeout_sec)
+            if result.returncode == 0 and _is_valid_wav(output_path):
+                return True
+            # エラー内容を保存（全試行失敗時の診断用）
+            try:
+                last_err = (result.stderr or b"").decode("utf-8", errors="replace")[:200]
+            except Exception:
+                last_err = f"returncode={result.returncode}"
+            # 無効WAVが出力されていたら削除してリトライへ
+            if output_path.exists() and not _is_valid_wav(output_path):
+                try:
+                    output_path.unlink()
+                except Exception:
+                    pass
+        except subprocess.TimeoutExpired:
+            last_err = f"timeout after {timeout_sec}s"
+            _kill_stale_voicepeak()
+            time.sleep(2)
+        except Exception as e:
+            last_err = f"exception: {e}"
+
+        # 試行後もキャンセルチェック
+        if _cancel_ongoing_synthesis.is_set():
+            return False
+
         if attempt < MAX_RETRIES - 1:
-            time.sleep(RETRY_DELAY)
+            # 指数バックオフ（2s → 3s → 4s → 5s）だが、キャンセル監視付き（0.5秒刻み）
+            wait_total = RETRY_DELAY + attempt
+            waited = 0.0
+            while waited < wait_total:
+                if _cancel_ongoing_synthesis.is_set():
+                    return False
+                time.sleep(0.3)
+                waited += 0.3
+
+    # 全試行失敗 → 診断情報をstderrに（GUIログには出ないが、ターミナル起動時に見える）
+    try:
+        import sys
+        sys.stderr.write(
+            f"[generate_wav] FAILED after {MAX_RETRIES} attempts: "
+            f"{output_path.name} text='{text[:40]}...' last_err='{last_err}'\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
     return False
 
 
@@ -203,14 +372,40 @@ def get_wav_duration(wav_path: Path) -> float:
         return 3.0  # デフォルト推定
 
 
-def combine_wavs_to_mp3(wav_dir: Path, output_path: Path, segment_count: int) -> bool:
+def check_missing_segments(wav_dir: Path, segment_count: int) -> list[int]:
+    """WAVが存在しない、または壊れているセグメントのインデックス一覧を返す。
+    MP3結合前にこれで検査しておくと、欠落セグメントがあるのに気付かず
+    MP3化してしまうのを防げる。"""
+    missing = []
+    for i in range(segment_count):
+        wav = wav_dir / f"seg_{i:03d}.wav"
+        if not _is_valid_wav(wav):
+            missing.append(i)
+    return missing
+
+
+def combine_wavs_to_mp3(wav_dir: Path, output_path: Path, segment_count: int,
+                         strict: bool = True) -> bool:
     """WAVファイルを番号順に結合しMP3に変換。
-    日本語パスを回避するため一時ディレクトリで作業する。"""
+    日本語パスを回避するため一時ディレクトリで作業する。
+
+    strict=True（デフォルト）: 欠けているWAVが1つでもあれば False を返して
+      既存のMP3を上書きしない。MP3が途中で途切れる致命的な事故（過去に
+      初期化中の修正適用で18MB→1MBに縮小した事例あり）を防ぐため。
+    strict=False: 存在するWAVだけを結合（呼び出し側で欠損許容を明示する場合）。
+    """
     import tempfile
+
+    # --- 欠損検査 ---
+    missing = [i for i in range(segment_count)
+               if not (wav_dir / f"seg_{i:03d}.wav").exists()]
+    if strict and missing:
+        # 上書きせず False を返す。呼び出し側で警告・保留処理を行う。
+        return False
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="podcast_combine_"))
     try:
-        # WAVファイルを一時ディレクトリにコピー
+        # WAVファイルを一時ディレクトリにコピー（存在するものすべて）
         for i in range(segment_count):
             wav = wav_dir / f"seg_{i:03d}.wav"
             if wav.exists():
@@ -437,6 +632,10 @@ class PodcastReviewerApp:
         self.script_display.tag_configure("playing", background="#1565c0", foreground="white")
         self.script_display.tag_raise("playing")  # female/male タグより前面に
 
+        # クリックで再生ハイライト位置を手動補正
+        # （音声とハイライトがずれたとき、聴こえている箇所をクリックして合わせる）
+        self.script_display.bind("<Button-1>", self._on_script_click)
+
         # ===== 修正入力 =====
         edit_frame = ttk.LabelFrame(root, text="4. 修正入力", padding=8)
         edit_frame.pack(fill=X, padx=10, pady=5)
@@ -549,19 +748,38 @@ class PodcastReviewerApp:
         self.selected_folder = OUTPUT_DIR / folder_name
         self.topic_name = folder_name.split("_")[0] if "_" in folder_name else folder_name
 
-        # ポッドキャストファイルを探す
-        mp3_files = list(self.selected_folder.glob("*ポッドキャスト.mp3"))
-        script_files = list(self.selected_folder.glob("*ポッドキャスト原稿.txt"))
+        # ポッドキャストファイルを探す（ファイル名に日付サフィックスが付くパターンなども許容）
+        # MP3: "*ポッドキャスト*.mp3" を幅広くマッチ。バージョン保存の "_v1.mp3" 等は除外。
+        mp3_candidates = [
+            f for f in self.selected_folder.glob("*ポッドキャスト*.mp3")
+            if not re.search(r"_v\d+\.mp3$", f.name)
+        ]
+        # もし上記で見つからなければ、フォルダ直下の全mp3を対象
+        if not mp3_candidates:
+            mp3_candidates = [
+                f for f in self.selected_folder.glob("*.mp3")
+                if not re.search(r"_v\d+\.mp3$", f.name)
+            ]
+        # 更新日時が新しい順に並べて最新を採用
+        mp3_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
-        if not mp3_files:
+        # 原稿テキスト: "*ポッドキャスト内容.txt" / "*ポッドキャスト原稿.txt" / "*ポッドキャスト*.txt" を順に試す
+        script_candidates: list = []
+        for pattern in ("*ポッドキャスト内容.txt", "*ポッドキャスト原稿.txt", "*ポッドキャスト*.txt"):
+            script_candidates = list(self.selected_folder.glob(pattern))
+            if script_candidates:
+                break
+        script_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        if not mp3_candidates:
             messagebox.showerror("エラー", "ポッドキャストMP3ファイルが見つかりません")
             return
-        if not script_files:
+        if not script_candidates:
             messagebox.showerror("エラー", "ポッドキャスト原稿ファイルが見つかりません")
             return
 
-        self.mp3_path = mp3_files[0]
-        self.script_path = script_files[0]
+        self.mp3_path = mp3_candidates[0]
+        self.script_path = script_candidates[0]
 
         self.file_label.config(text=f"📁 {self.mp3_path.name}")
         self.status_var.set("原稿を読み込み中...")
@@ -578,6 +796,9 @@ class PodcastReviewerApp:
         self.script_text = self.script_path.read_text(encoding="utf-8")
         self.dialogue = parse_dialogue_script(self.script_text)
         self.segments = build_segments(self.dialogue)
+        # total_duration 確定後に較正（seg_durations はこの後の _initialize_wavs で
+        # 埋まるので、再度 _calibrate_seg_durations が呼ばれる。ここは初期推定用）
+        self.root.after(100, self._calibrate_seg_durations)
 
         self._display_script()
 
@@ -611,38 +832,49 @@ class PodcastReviewerApp:
             self.script_display.insert(END, f"{prefix}{line['text']}\n", tag)
 
             # このdialogue行を分割した各セグメントの文字位置を記録
+            # build_segments と同じロジック（split_long_text → 文末分割）で位置を計算する
             parts = split_long_text(line["text"])
             char_offset = 0
             for part in parts:
-                # Textウィジェットは1始まりの行番号
-                self._seg_positions.append((line_idx + 1, len(prefix) + char_offset))
-                char_offset += len(part)
+                sents = [s for s in re.split(r'(?<=[。！？])', part) if s.strip()]
+                if not sents:
+                    sents = [part]
+                for sent in sents:
+                    # Textウィジェットは1始まりの行番号
+                    self._seg_positions.append((line_idx + 1, len(prefix) + char_offset))
+                    char_offset += len(sent)
 
         self.script_display.config(state=DISABLED)
 
     def _initialize_wavs(self):
-        """全セグメントのWAVを生成してキャッシュ（キャンセル可能）"""
+        """全セグメントのWAVを生成してキャッシュ（キャンセル可能）。
+
+        セグメント単位のテキストハッシュで変更検出し、実際に変わった箇所だけ再生成する。
+        これにより小さな修正で全WAVが消える事故を防ぐ。
+        """
         try:
             with self._wav_lock:
                 self.work_dir = self.selected_folder / "_review_work"
                 self.work_dir.mkdir(exist_ok=True)
 
-                # --- 原稿ハッシュでキャッシュの有効性を検証 ---
-                script_hash = hashlib.md5(
-                    self.script_text.encode("utf-8")
-                ).hexdigest()
-                hash_file = self.work_dir / "_script_hash.txt"
-                cache_valid = False
-                if hash_file.exists():
-                    old_hash = hash_file.read_text(encoding="utf-8").strip()
-                    cache_valid = (old_hash == script_hash)
+                # --- セグメント単位のハッシュキャッシュを読み込み ---
+                # 旧 `_script_hash.txt` 方式（全WAV一括削除）は廃止。
+                # 代わりに per-segment JSON マップを使って差分再生成する。
+                seg_hash_file = self.work_dir / "_segment_hashes.json"
+                old_seg_hashes: dict = {}
+                if seg_hash_file.exists():
+                    try:
+                        import json as _json
+                        old_seg_hashes = _json.loads(
+                            seg_hash_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        old_seg_hashes = {}
 
-                if not cache_valid:
-                    self.root.after(0, lambda: self.status_var.set(
-                        "原稿が更新されています。キャッシュをクリアして再生成します..."))
-                    for old_wav in self.work_dir.glob("seg_*.wav"):
-                        old_wav.unlink()
-                    hash_file.write_text(script_hash, encoding="utf-8")
+                def _seg_hash(seg: dict) -> str:
+                    key = f"{seg.get('speaker','')}|{seg.get('emotion','N')}|{seg.get('text','')}"
+                    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+                new_seg_hashes: dict = {}
 
                 total = len(self.segments)
                 self.seg_durations = [0.0] * total
@@ -652,21 +884,46 @@ class PodcastReviewerApp:
                     f"音声セグメントを準備中... (0/{total})"))
 
                 fail_count = 0
+                failed_indices: list[int] = []
+                actually_regenerated = False  # WAVが欠損して実際に再生成したか（ハッシュ変化なしでも）
                 for i, seg in enumerate(self.segments):
                     # キャンセルチェック
                     if self._init_cancel.is_set():
                         self.root.after(0, lambda: self.status_var.set(
                             "バックグラウンド初期化を中断しました"))
+                        # ここまでに確定したハッシュを保存
+                        try:
+                            import json as _json
+                            seg_hash_file.write_text(
+                                _json.dumps(new_seg_hashes), encoding="utf-8")
+                        except Exception:
+                            pass
                         return
 
                     wav_path = self.work_dir / f"seg_{i:03d}.wav"
+                    cur_hash = _seg_hash(seg)
+                    new_seg_hashes[str(i)] = cur_hash
 
-                    if wav_path.exists():
+                    # キャッシュ再利用の条件:
+                    # ① WAVファイルが存在する
+                    # ② 旧ハッシュが記録されていて、現在のセグメント内容と一致する
+                    #    （旧ハッシュが無い = 過去データ → 存在だけで再利用）
+                    prev_hash = old_seg_hashes.get(str(i))
+                    can_reuse = wav_path.exists() and (
+                        prev_hash is None or prev_hash == cur_hash
+                    )
+                    if can_reuse:
                         self.seg_durations[i] = get_wav_duration(wav_path)
                         self.root.after(0, lambda v=i+1: self.progress.config(value=v))
                         self.root.after(0, lambda v=i+1, t=total: self.status_var.set(
                             f"音声セグメント読み込み中... ({v}/{t}) ※キャッシュ使用"))
                         continue
+                    # 内容が変わっている or WAVが無い → 古いWAVは削除して再生成
+                    if wav_path.exists() and prev_hash and prev_hash != cur_hash:
+                        try:
+                            wav_path.unlink()
+                        except Exception:
+                            pass
 
                     narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
                     speaker = "女性" if seg["speaker"] == "F" else "男性"
@@ -678,15 +935,37 @@ class PodcastReviewerApp:
                                    speaker=seg["speaker"],
                                    emotion=seg.get("emotion", "N")):
                         self.seg_durations[i] = get_wav_duration(wav_path)
+                        actually_regenerated = True  # 欠損WAVを実際に再生成した
                     else:
                         fail_count += 1
+                        failed_indices.append(i)
 
                     self.root.after(0, lambda v=i+1: self.progress.config(value=v))
 
                 self.is_initialized = True
+                                # --- 正常終了時のハッシュ保存 ---
+                # キャンセルパスと同じ内容を確定保存して、次回起動時に差分検出できるようにする
+                try:
+                    import json as _json
+                    seg_hash_file.write_text(
+                        _json.dumps(new_seg_hashes), encoding="utf-8")
+                except Exception:
+                    pass
+
+                # 失敗リトライはロック解放後に実行するため、ここで保持しておく
+                self._pending_retry_indices = failed_indices
 
                 # キャッシュ無効時（スクリプト更新時）はMP3も再構築して総時間を更新
-                if not cache_valid and self.mp3_path:
+                # per-segment 方式では cache_valid は廃止。
+                # 再生成が 1 件でもあれば MP3 を組み直す。
+
+                any_regenerated = any(
+                     old_seg_hashes.get(str(i)) != new_seg_hashes.get(str(i))
+                     for i in range(total)
+                     )
+                # ★ ハッシュ変化がなくてもWAV欠損を再生成した場合はMP3再構築が必要
+                if (any_regenerated or actually_regenerated) and self.mp3_path:
+
                     self.root.after(0, lambda: self.status_var.set(
                         "MP3を再構築中（スクリプト更新）..."))
                     mp3_ok = combine_wavs_to_mp3(
@@ -694,7 +973,11 @@ class PodcastReviewerApp:
                     if mp3_ok:
                         new_dur = get_audio_duration(self.mp3_path)
                         if new_dur > 0:
+                            # _apply_new_duration の内部で _calibrate_seg_durations を呼ぶ
                             self.root.after(0, lambda d=new_dur: self._apply_new_duration(d))
+                    else:
+                        # MP3は変わらないが seg_durations が更新されたので較正
+                        self.root.after(0, self._calibrate_seg_durations)
 
                 if fail_count > 0:
                     self.root.after(0, lambda fc=fail_count, t=total: self.status_var.set(
@@ -713,6 +996,76 @@ class PodcastReviewerApp:
             self.root.after(0, lambda: self.btn_apply.config(state=NORMAL))
         self.root.after(0, lambda: self.progress.config(value=0))
 
+        # ===== ロック解放後の失敗リトライパス =====
+        # _wav_lock を解放してから別スレッドで失敗セグメントを再生成する。
+        # これにより修正操作 (_do_correction 等) が init 完了を待たずに進められる。
+        pending = getattr(self, "_pending_retry_indices", None)
+        if pending:
+            self._pending_retry_indices = []
+            threading.Thread(
+                target=self._retry_failed_segments,
+                args=(list(pending),),
+                daemon=True,
+            ).start()
+
+    def _retry_failed_segments(self, failed_indices: list):
+        """初期化中に失敗したセグメントを、ロックを取らずに再試行する。
+
+        _wav_lock 内で走らせるとユーザーの修正操作が長時間ブロックされるため、
+        ここでは短時間だけロックを取って個別セグメントを生成する方式にする。
+        途中でキャンセルが来た場合は即中断する。
+        """
+        if not failed_indices:
+            return
+        for retry_round in range(2):
+            if self._init_cancel.is_set():
+                return
+            if not failed_indices:
+                break
+            # VoicePeakのクールダウン（キャンセル可能な短い刻みで待機）
+            _kill_stale_voicepeak()
+            for _ in range(6):  # 合計 3 秒待機、0.5 秒刻み
+                if self._init_cancel.is_set():
+                    return
+                time.sleep(0.5)
+
+            still_failed: list[int] = []
+            for i in failed_indices:
+                if self._init_cancel.is_set():
+                    return
+                if i >= len(self.segments):
+                    continue
+                seg = self.segments[i]
+                wav_path = self.work_dir / f"seg_{i:03d}.wav"
+                if wav_path.exists():
+                    # 他の経路で既に生成済み（修正適用など）
+                    continue
+                narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
+                self.root.after(0, lambda idx=i, r=retry_round+1:
+                    self.status_var.set(
+                        f"失敗セグメントを再生成中... (ラウンド{r}/2) #{idx+1}"))
+                # ロックは各セグメント生成中だけ取る（修正操作に干渉しない）
+                acquired = self._wav_lock.acquire(timeout=1.0)
+                if not acquired:
+                    # 他処理が長時間ロックを握っている → 次のセグメントへ
+                    still_failed.append(i)
+                    continue
+                try:
+                    if generate_wav(seg["text"], narrator, wav_path,
+                                   speaker=seg["speaker"],
+                                   emotion=seg.get("emotion", "N")):
+                        self.seg_durations[i] = get_wav_duration(wav_path)
+                    else:
+                        still_failed.append(i)
+                finally:
+                    self._wav_lock.release()
+            failed_indices = still_failed
+
+        # 最後までダメだった場合はステータスに表示
+        if failed_indices:
+            self.root.after(0, lambda n=len(failed_indices): self.status_var.set(
+                f"{n} セグメントの再生成に失敗しました（原稿を見直してください）"))
+
     def _apply_new_duration(self, duration: float):
         """MP3総時間を更新してシークバーに反映（バックグラウンドスレッドから after(0,...) で呼ぶ）"""
         self.total_duration = duration
@@ -721,6 +1074,88 @@ class PodcastReviewerApp:
             self.total_time_label.config(text=format_time(duration))
         except Exception:
             pass
+        # MP3の実尺が確定したので seg_durations を比例補正する
+        self._calibrate_seg_durations()
+
+    def _calibrate_seg_durations(self):
+        """seg_durations の合計を MP3 実際の総尺に合わせて比例補正する。
+
+        個別WAVをffprobeで計測して足し合わせた値と、ffmpegでMP3化した後の
+        実際の再生時間は必ずずれる（エンコーダーディレイ・測定丸め誤差等）。
+        119セグメントで各50ms誤差があると最大6秒の累積ズレになり、再生位置
+        ハイライトが音声と大きくずれる主原因になる。
+        この補正で合計を total_duration に一致させ、累積ドリフトを解消する。
+        """
+        if self.total_duration <= 0 or not self.seg_durations:
+            return
+        # duration=0（未生成セグメント）は推定値(3.0)で一時補完してから補正する
+        # 実際に 0 のままだと比率計算が壊れるため、まず全体の平均で埋める
+        n = len(self.seg_durations)
+        nonzero = [d for d in self.seg_durations if d > 0]
+        if not nonzero:
+            return
+        avg = self.total_duration / n
+        filled = [d if d > 0 else avg for d in self.seg_durations]
+        total_est = sum(filled)
+        if total_est <= 0:
+            return
+        scale = self.total_duration / total_est
+        # スケール比が 0.8〜1.2 の範囲なら補正を適用（異常値は無視）
+        if not (0.8 <= scale <= 1.2):
+            return
+        self.seg_durations = [d * scale for d in filled]
+
+    def _on_script_click(self, event):
+        """原稿テキストクリックで再生ハイライト位置を手動補正する。
+
+        音声とハイライトがずれたとき、今聴こえている箇所をクリックすると
+        ハイライトがそこに移動し、以降の追従もその位置から続く。
+        直接修正モード中はテキスト編集用クリックとして扱うため何もしない。
+        再生中でない場合もハイライトをクリック位置に移動する。
+        """
+        # 直接修正モード中はテキスト編集に専念（干渉しない）
+        if getattr(self, '_direct_edit_mode', False):
+            return
+
+        if not hasattr(self, '_seg_positions') or not self._seg_positions:
+            return
+
+        # クリックされた Tkinter テキスト座標（例: "5.12" = 5行目12文字目）
+        try:
+            idx_str = self.script_display.index(f"@{event.x},{event.y}")
+            click_line = int(idx_str.split('.')[0])
+            click_col  = int(idx_str.split('.')[1])
+        except Exception:
+            return
+
+        # クリック位置以前で最後に始まるセグメントを探す
+        # _seg_positions[i] = (widget_line, char_col) はセグメント i の開始位置
+        best = None
+        for i, (seg_line, seg_col) in enumerate(self._seg_positions):
+            if seg_line < click_line:
+                best = i
+            elif seg_line == click_line and seg_col <= click_col:
+                best = i
+            else:
+                break  # それ以降は必ずクリック位置より後（ソート済み）
+
+        if best is None:
+            best = 0
+
+        # クリックしたセグメントの開始時刻
+        seg_start = self._get_segment_start_time(best)
+
+        if self.is_playing:
+            # 再生タイマー基準をクリック位置に合わせ直す
+            # → 以降 elapsed = 0 から seg_start が起点になり追従がクリック位置から再開
+            self.play_offset = seg_start
+            self.play_start_time = time.time()  # elapsed をリセット
+
+        # ハイライトをクリック位置に即座に更新
+        self._update_playback_highlight(seg_start)
+        # シークバーの表示もクリック位置に合わせる
+        self.seek_var.set(min(seg_start, self.total_duration))
+        self.time_label.config(text=format_time(seg_start))
 
     def _play_from(self, start_sec: float = 0, duration_sec: float = 0):
         """指定位置から再生を開始"""
@@ -760,7 +1195,8 @@ class PodcastReviewerApp:
     def _pause(self):
         """一時停止 — 現在位置を保持"""
         if self.is_playing:
-            elapsed = time.time() - self.play_start_time
+            elapsed = max(0.0, time.time() - self.play_start_time
+                          - FFPLAY_STARTUP_LATENCY_SEC)
             current_pos = self.play_offset + elapsed
             self._stop_playback_internal()
             self.seek_var.set(min(current_pos, self.total_duration))
@@ -813,7 +1249,10 @@ class PodcastReviewerApp:
 
         # ドラッグ中はバーを更新しない
         if not self._seek_dragging:
-            elapsed = time.time() - self.play_start_time
+            # ffplay が起動してから実際に音が出始めるまでの遅延を差し引く。
+            # これをしないとハイライトが常に音より先行してしまう。
+            elapsed = max(0.0, time.time() - self.play_start_time
+                          - FFPLAY_STARTUP_LATENCY_SEC)
             current_pos = self.play_offset + elapsed
             if current_pos <= self.total_duration:
                 self.seek_var.set(current_pos)
@@ -1033,8 +1472,26 @@ class PodcastReviewerApp:
         """修正処理（バックグラウンド）"""
         # バックグラウンド初期化を中断してロック取得
         self._init_cancel.set()
-        self._wav_lock.acquire()
-        self._init_cancel.clear()  # 次回の初期化用にリセット
+        request_cancel_synthesis()  # 進行中の generate_wav を即中断
+
+        # 最大30秒でロック取得。0.5秒おきにキャンセル信号を送り直す。
+        acquired = False
+        import time as _t
+        deadline = _t.time() + 30.0
+        while _t.time() < deadline:
+            if self._wav_lock.acquire(timeout=0.5):
+                acquired = True
+                break
+            request_cancel_synthesis()
+
+        if not acquired:
+            self.root.after(0, lambda: self.status_var.set(
+                "バックグラウンド処理を中断できませんでした。もう一度「修正を適用」を押してください"))
+            self.root.after(0, self._reset_edit_state)
+            return
+
+        self._init_cancel.clear()
+        clear_cancel_synthesis()  # 自分の合成は通すのでフラグ解除
         try:
             self.root.after(0, lambda: self.status_var.set("修正を適用中..."))
 
@@ -1107,7 +1564,13 @@ class PodcastReviewerApp:
             self.root.after(0, lambda t=total_gen: self.status_var.set(
                 f"音声セグメントを生成中... (0/{t})"))
 
+            # キャンセルフラグを監視しながら生成する。
+            # 途中キャンセルされた場合は MP3 を絶対に上書きしない（欠損MP3事故防止）。
+            gen_aborted = False
             for ci, seg_idx in enumerate(need_gen):
+                if _cancel_ongoing_synthesis.is_set() or self._init_cancel.is_set():
+                    gen_aborted = True
+                    break
                 seg = self.segments[seg_idx]
                 narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
                 wav_path = self.work_dir / f"seg_{seg_idx:03d}.wav"
@@ -1121,13 +1584,57 @@ class PodcastReviewerApp:
                                emotion=seg.get("emotion", "N")):
                     self.seg_durations[seg_idx] = get_wav_duration(wav_path)
 
-            # 5. MP3を再構築
+            # 5. MP3を再構築（strictモード: 欠損があれば既存MP3を上書きしない）
+            # これをしないと、初期化未完了時の修正で MP3 が極端に短く切り詰められる
+            # （過去に18MB→1.1MBに縮小した致命的事故あり）。
+            missing_wavs = [
+                i for i in range(len(self.segments))
+                if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+            ]
+            if missing_wavs or gen_aborted:
+                # MP3 も 原稿ファイル も上書きしない。セグメントだけ更新して警告。
+                if log_path:
+                    with open(log_path, "a", encoding="utf-8") as lf:
+                        lf.write(
+                            f"  MP3再構築: SKIPPED (欠損={len(missing_wavs)}, "
+                            f"aborted={gen_aborted})\n"
+                        )
+                self.root.after(0, lambda n=len(missing_wavs): messagebox.showwarning(
+                    "MP3再構築を保留しました",
+                    f"{n}個のセグメント音声がまだ生成できていないため、\n"
+                    f"MP3の再構築を中止しました（短く切れて上書きされるのを防ぐため）。\n\n"
+                    f"バックグラウンド初期化が完了してから、もう一度\n"
+                    f"「修正を適用」を押してください。"
+                ))
+                self.root.after(0, lambda err=f"{len(missing_wavs)}件の音声未生成のためMP3更新を保留":
+                    self.status_var.set(err))
+                # self.dialogue / self.segments は既にメモリ上で更新済み。
+                # 原稿ファイル保存もスキップして状態の不整合を防ぐ
+                # （MP3と原稿の整合性を守るため、両方とも古いまま残す）。
+                self.dialogue = self._backup_dialogue
+                self.segments = self._backup_segments
+                self.root.after(0, self._reset_edit_state)
+                self.root.after(0, self._display_script)
+                return
+
             self.root.after(0, lambda: self.status_var.set("MP3を再構築中..."))
             mp3_ok = combine_wavs_to_mp3(self.work_dir, self.mp3_path, len(self.segments))
 
             if log_path:
                 with open(log_path, "a", encoding="utf-8") as lf:
                     lf.write(f"  MP3再構築: {'OK' if mp3_ok else 'FAILED'}\n")
+
+            if not mp3_ok:
+                # ffmpeg結合自体が失敗 — 原稿ファイルの書き換えも行わない
+                self.root.after(0, lambda: messagebox.showerror(
+                    "MP3再構築失敗",
+                    "ffmpegによるMP3結合に失敗しました。既存のMP3はそのまま残しています。"
+                ))
+                self.dialogue = self._backup_dialogue
+                self.segments = self._backup_segments
+                self.root.after(0, self._reset_edit_state)
+                self.root.after(0, self._display_script)
+                return
 
             # 6. 原稿ファイルも更新（感情タグを保持して書き戻す）
             updated_script = "\n".join(
@@ -1137,10 +1644,20 @@ class PodcastReviewerApp:
             self.script_path.write_text(updated_script, encoding="utf-8")
             self.script_text = updated_script
 
-            # 6b. キャッシュハッシュも更新
+            # 6b. キャッシュハッシュも更新（per-segment 方式、_script_hash.txt は廃止）
             new_hash = hashlib.md5(updated_script.encode("utf-8")).hexdigest()
-            hash_file = self.work_dir / "_script_hash.txt"
-            hash_file.write_text(new_hash, encoding="utf-8")
+            seg_hash_file = self.work_dir / "_segment_hashes.json"
+            try:
+                import json as _json
+                cur_hashes: dict = {}
+                if seg_hash_file.exists():
+                    cur_hashes = _json.loads(seg_hash_file.read_text(encoding="utf-8"))
+                for i, seg in enumerate(self.segments):
+                    key = f"{seg.get('speaker','')}|{seg.get('emotion','N')}|{seg.get('text','')}"
+                    cur_hashes[str(i)] = hashlib.md5(key.encode("utf-8")).hexdigest()
+                seg_hash_file.write_text(_json.dumps(cur_hashes), encoding="utf-8")
+            except Exception:
+                pass
 
             if log_path:
                 with open(log_path, "a", encoding="utf-8") as lf:
@@ -1184,7 +1701,11 @@ class PodcastReviewerApp:
                 f"修正エラー: {err[:100]}"))
             self.root.after(0, self._reset_edit_state)
         finally:
-            self._wav_lock.release()
+            # ロック取得に成功した場合のみ release（未取得で例外時の二重解放を防ぐ）
+            try:
+                self._wav_lock.release()
+            except Exception:
+                pass
             # 初期化が途中でキャンセルされていた場合は再開（未初期化セグメントを埋める）
             self.root.after(500, self._restart_init_if_needed)
 
@@ -1256,8 +1777,23 @@ class PodcastReviewerApp:
                                emotion=seg.get("emotion", "N")):
                     self.seg_durations[seg_idx] = get_wav_duration(wav_path)
 
-        # MP3を再構築
-        combine_wavs_to_mp3(self.work_dir, self.mp3_path, len(self.segments))
+        # MP3を再構築（strictモード: 欠損があれば既存MP3を上書きしない）
+        missing_wavs = [
+            i for i in range(len(self.segments))
+            if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+        ]
+        if missing_wavs:
+            # 欠損があるため MP3 も 原稿ファイルも更新しない（短縮MP3事故防止）
+            self.root.after(0, lambda n=len(missing_wavs): self.status_var.set(
+                f"取り消し保留: {n}件の音声が未生成のためMP3を更新できません"))
+            self.root.after(0, self._reset_edit_state)
+            return
+        mp3_ok = combine_wavs_to_mp3(self.work_dir, self.mp3_path, len(self.segments))
+        if not mp3_ok:
+            self.root.after(0, lambda: self.status_var.set(
+                "取り消し: MP3再構築に失敗しました（既存ファイルは保持）"))
+            self.root.after(0, self._reset_edit_state)
+            return
 
         # 原稿ファイルも復元（感情タグを保持して書き戻す）
         updated_script = "\n".join(
@@ -1267,10 +1803,24 @@ class PodcastReviewerApp:
         self.script_path.write_text(updated_script, encoding="utf-8")
         self.script_text = updated_script
 
-        # キャッシュハッシュも復元
-        restored_hash = hashlib.md5(updated_script.encode("utf-8")).hexdigest()
-        hash_file = self.work_dir / "_script_hash.txt"
-        hash_file.write_text(restored_hash, encoding="utf-8")
+        # キャッシュハッシュも復元（per-segment 方式）
+        seg_hash_file = self.work_dir / "_segment_hashes.json"
+        try:
+            import json as _json
+            cur_hashes: dict = {}
+            if seg_hash_file.exists():
+                cur_hashes = _json.loads(seg_hash_file.read_text(encoding="utf-8"))
+            for i, seg in enumerate(self.segments):
+                key = f"{seg.get('speaker','')}|{seg.get('emotion','N')}|{seg.get('text','')}"
+                cur_hashes[str(i)] = hashlib.md5(key.encode("utf-8")).hexdigest()
+            seg_hash_file.write_text(_json.dumps(cur_hashes), encoding="utf-8")
+        except Exception:
+            pass
+        # 旧ファイルがあれば掃除
+        try:
+            (self.work_dir / "_script_hash.txt").unlink(missing_ok=True)
+        except Exception:
+            pass
 
         self.root.after(0, self._display_script)
         self.root.after(0, self._reset_edit_state)
@@ -1314,6 +1864,11 @@ class PodcastReviewerApp:
         self._stop_playback_internal()
         self.seek_var.set(self._direct_edit_start_pos)
         self.time_label.config(text=format_time(self._direct_edit_start_pos))
+
+        # ★ 直接修正モード中はバックグラウンドinit を止めない ★
+        # テキスト編集自体はVoicePeakを使わないため、initをそのまま走らせて
+        # 「修正の適用」を押すまでにできるだけ多くのWAVを揃えておく。
+        # initの停止は「修正のテスト」「修正の適用」が自分でキャンセルする。
 
         # dialogueをバックアップ
         self._direct_edit_backup_dialogue = [dict(d) for d in self.dialogue]
@@ -1486,6 +2041,29 @@ class PodcastReviewerApp:
         if self._direct_edit_temp_dir and self._direct_edit_temp_dir.exists():
             shutil.rmtree(self._direct_edit_temp_dir, ignore_errors=True)
 
+        # バックグラウンド初期化を止めてから自分のgenerate_wavを走らせる。
+        # ポイント: clear_cancel_synthesis() を呼ぶのは _initialize_wavs が
+        # ロックを手放したことを確認してから。
+        # 早まって解除すると _initialize_wavs の generate_wav がリトライし続け、
+        # ロックが解放されず「修正の適用」が永遠に待ち続けることになる。
+        self._init_cancel.set()
+        _cancel_ongoing_synthesis.set()
+        threading.Thread(target=_kill_stale_voicepeak, daemon=True).start()
+        deadline_test = time.time() + 20.0
+        last_kill_at = time.time()
+        while time.time() < deadline_test:
+            if self._wav_lock.acquire(timeout=0.5):
+                self._wav_lock.release()
+                break
+            # 再kill は3秒間隔で別スレッドから（このスレッドを固めないため）
+            now = time.time()
+            if now - last_kill_at > 3.0:
+                last_kill_at = now
+                _cancel_ongoing_synthesis.set()
+                threading.Thread(target=_kill_stale_voicepeak, daemon=True).start()
+        clear_cancel_synthesis()
+        self._init_cancel.clear()
+
         tmp_dir = Path(_tempfile.mkdtemp(prefix="podcast_test_"))
         self._direct_edit_temp_dir = tmp_dir
 
@@ -1540,9 +2118,12 @@ class PodcastReviewerApp:
 
     def _apply_direct_edit(self):
         """直接修正を適用"""
-        # テスト再生を停止
+        # テスト再生を停止（terminate自体は非ブロッキング）
         if self._direct_edit_test_process and self._direct_edit_test_process.poll() is None:
-            self._direct_edit_test_process.terminate()
+            try:
+                self._direct_edit_test_process.terminate()
+            except Exception:
+                pass
 
         current_text = self.script_display.get("1.0", END)
         new_dialogue = parse_dialogue_script(current_text)
@@ -1550,8 +2131,10 @@ class PodcastReviewerApp:
             messagebox.showwarning("パースエラー", "テキストをパースできませんでした")
             return
 
-        # セグメント数が大幅に減った場合（3行以上削減）は確認ダイアログを出す
-        old_count = len(self.segments)
+        # 対話行数（F:/M: 行の数）が大幅に減った場合（3行以上削減）は確認ダイアログを出す。
+        # ※ self.segments は build_segments で長文を分割した後の数なので比較対象としてはNG。
+        #   必ず対話行（self.dialogue / new_dialogue）同士で比較する。
+        old_count = len(self.dialogue)
         new_count = len(new_dialogue)
         if new_count < old_count - 2:
             diff = old_count - new_count
@@ -1571,15 +2154,59 @@ class PodcastReviewerApp:
                 self.status_var.set("適用をキャンセルしました。テキストを確認してください。")
                 return
 
+        # バックグラウンド初期化 / テスト合成を止めるフラグをメインスレッドで即セット。
+        # ※ _kill_stale_voicepeak() は taskkill に最大10秒かかりメインを固めるため、
+        #   実際のVoicePeak掃除は別スレッドに投げる。
+        self._init_cancel.set()
+        _cancel_ongoing_synthesis.set()
+        threading.Thread(target=_kill_stale_voicepeak, daemon=True).start()
+
         self.btn_test_edit.config(state=DISABLED)
         self.btn_apply_edit.config(state=DISABLED)
-        self.btn_cancel_edit.config(state=DISABLED)
+        # ★ 修正の中止は適用中でも押せるようにする（長時間かかる場合の脱出口）
+        # btn_cancel_edit は DISABLED にしない
+        self.status_var.set("直接修正を適用中... バックグラウンド処理の停止を待っています")
 
         threading.Thread(target=self._do_direct_apply,
                          args=(new_dialogue,), daemon=True).start()
 
     def _do_direct_apply(self, new_dialogue: list):
         """直接修正の適用処理（バックグラウンド）"""
+        # 走行中のバックグラウンド初期化/テスト合成を止めてロック取得。
+        # これをやらないと初期化が未完了のまま combine_wavs_to_mp3 が走り、
+        # 部分的なWAV集合だけでMP3が作られて途中で切れてしまう。
+        # ※ フラグ設定とVoicePeak掃除は _apply_direct_edit 側（メインスレッド）で
+        #   既に別スレッド発火済み。ここでは二重kill を避けつつロック取得を待つ。
+        self._init_cancel.set()
+        _cancel_ongoing_synthesis.set()
+
+        # 最大30秒かけてロック取得を試みる。
+        # taskkill を直列に呼ぶとこのスレッド自体が1ラウンド最大10秒ブロックされ、
+        # `after(0, status_var.set(...))` が詰まってUIが固まって見えるため、
+        # 再kill は別スレッド発火にして取得ループ自体は短い刻みで待つ。
+        acquired = False
+        import time as _t
+        deadline = _t.time() + 30.0
+        last_kill_at = 0.0
+        while _t.time() < deadline:
+            if self._wav_lock.acquire(timeout=0.5):
+                acquired = True
+                break
+            # フラグは既に立っている。3秒に1回だけ追加でVoicePeakを掃除する。
+            now = _t.time()
+            if now - last_kill_at > 3.0:
+                last_kill_at = now
+                _cancel_ongoing_synthesis.set()
+                threading.Thread(target=_kill_stale_voicepeak, daemon=True).start()
+
+        if not acquired:
+            self.root.after(0, lambda: self.status_var.set(
+                "バックグラウンド処理を中断できませんでした。もう一度「修正の適用」を押してください"))
+            self.root.after(0, self._finish_direct_edit_mode)
+            return
+
+        self._init_cancel.clear()
+        clear_cancel_synthesis()  # 自分の合成は通したいので解除
         try:
             # work_dir が未作成なら作成
             if not self.work_dir:
@@ -1610,11 +2237,22 @@ class PodcastReviewerApp:
             if len(self.seg_durations) > len(self.segments):
                 self.seg_durations = self.seg_durations[:len(self.segments)]
 
-            total_gen = len(changed_indices)
+            # ★ 変更セグメントのみ再生成（missing未初期化セグメントは後でinitに任せる）
+            # 全missing再生成は init 未完了時に 30〜60 セグメント生成→3〜10 分フリーズの原因。
+            need_gen = sorted(changed_indices)
+            changed_set = set(changed_indices)
+
+            total_gen = len(need_gen)
             self.root.after(0, lambda t=total_gen: self.status_var.set(
                 f"直接修正を適用中... 0/{t}"))
 
-            for ci, seg_idx in enumerate(changed_indices):
+            for ci, seg_idx in enumerate(need_gen):
+                # ★ 中止ボタンが押されたらここで抜ける
+                if self._init_cancel.is_set():
+                    self.root.after(0, lambda: self.status_var.set(
+                        "直接修正の適用を中止しました"))
+                    self.root.after(0, self._finish_direct_edit_mode)
+                    return
                 if seg_idx >= len(self.segments):
                     continue
                 seg = self.segments[seg_idx]
@@ -1627,11 +2265,53 @@ class PodcastReviewerApp:
                                 emotion=seg.get("emotion", "N")):
                     self.seg_durations[seg_idx] = get_wav_duration(wav_path)
 
-            # MP3再構築
-            self.root.after(0, lambda: self.status_var.set("MP3を再構築中..."))
-            combine_wavs_to_mp3(self.work_dir, self.mp3_path, len(self.segments))
+            # ── 変更セグメントの再試行（失敗したものだけ） ──
+            changed_missing = [
+                i for i in changed_indices
+                if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+            ]
+            if changed_missing:
+                self.root.after(0, lambda n=len(changed_missing): self.status_var.set(
+                    f"変更セグメントを再試行中... ({n}件)"))
+                _kill_stale_voicepeak()
+                time.sleep(2)
+                for i in changed_missing:
+                    if self._init_cancel.is_set():
+                        self.root.after(0, lambda: self.status_var.set(
+                            "直接修正の適用を中止しました"))
+                        self.root.after(0, self._finish_direct_edit_mode)
+                        return
+                    seg = self.segments[i]
+                    narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
+                    wav_path = self.work_dir / f"seg_{i:03d}.wav"
+                    if generate_wav(seg["text"], narrator, wav_path,
+                                    speaker=seg["speaker"],
+                                    emotion=seg.get("emotion", "N")):
+                        self.seg_durations[i] = get_wav_duration(wav_path)
 
-            # 原稿ファイル更新
+            # 変更セグメントがまだ揃っていない場合 → MP3も原稿も上書きしない
+            changed_missing_final = [
+                i for i in changed_indices
+                if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+            ]
+            if changed_missing_final:
+                self.root.after(0, lambda n=len(changed_missing_final): messagebox.showwarning(
+                    "変更セグメント音声化失敗 — MP3は更新しません",
+                    f"{n} セグメントの音声生成に失敗しました。\n"
+                    f"MP3が短く切れて上書きされるのを防ぐため更新を中止しました。\n\n"
+                    f"もう一度「修正の適用」を押すか、「修正の中止」で元に戻してください。"))
+                return
+
+            # ── 未初期化セグメントの確認 ──
+            # 変更セグメントは揃っている。変更なし・init未完了のセグメントが残っている場合は
+            # 原稿だけ保存してバックグラウンドinitに任せる（MP3はinit完了後に再構築）。
+            unchanged_missing = [
+                i for i in range(len(self.segments))
+                if i not in changed_set
+                and not (self.work_dir / f"seg_{i:03d}.wav").exists()
+            ]
+
+            # 原稿ファイル保存（変更セグメントのハッシュを更新）
             updated = "\n".join(
                 f"{d['speaker']}[{d.get('emotion','N')}]:{d['text']}"
                 for d in self.dialogue
@@ -1639,9 +2319,57 @@ class PodcastReviewerApp:
             self.script_text = updated
             if self.script_path:
                 self.script_path.write_text(updated, encoding="utf-8")
-                new_hash = hashlib.md5(updated.encode("utf-8")).hexdigest()
                 if self.work_dir:
-                    (self.work_dir / "_script_hash.txt").write_text(new_hash, encoding="utf-8")
+                    seg_hash_file = self.work_dir / "_segment_hashes.json"
+                    try:
+                        import json as _json
+                        cur_hashes: dict = {}
+                        if seg_hash_file.exists():
+                            cur_hashes = _json.loads(
+                                seg_hash_file.read_text(encoding="utf-8"))
+                        # 変更セグメントだけハッシュ更新（残りはinitが更新）
+                        for i in changed_indices:
+                            if i < len(self.segments):
+                                seg = self.segments[i]
+                                key = (f"{seg.get('speaker','')}|"
+                                       f"{seg.get('emotion','N')}|{seg.get('text','')}")
+                                cur_hashes[str(i)] = hashlib.md5(
+                                    key.encode("utf-8")).hexdigest()
+                        seg_hash_file.write_text(
+                            _json.dumps(cur_hashes), encoding="utf-8")
+                    except Exception:
+                        pass
+                    try:
+                        (self.work_dir / "_script_hash.txt").unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            if unchanged_missing:
+                # 変更部分は正しい。init未完了WAVが残っているのでinitに再構築を任せる。
+                # MP3はinitが全WAVを揃えた後に自動再構築される。
+                # seg_durationsを0にしておくことで _restart_init_if_needed が確実に発火する。
+                for i in unchanged_missing:
+                    if i < len(self.seg_durations):
+                        self.seg_durations[i] = 0.0
+                self.root.after(0, self._finish_direct_edit_mode)
+                self.root.after(0, lambda n=len(unchanged_missing), tc=total_gen: self.status_var.set(
+                    f"原稿を保存しました（{tc}セグメント修正）。"
+                    f"残り{n}セグメントの音声を再生成中（完了後にMP3が更新されます）"))
+                self._init_cancel.clear()
+                clear_cancel_synthesis()
+                self.root.after(300, self._restart_init_if_needed)
+                return
+
+            # ── 全WAV揃っている → MP3再構築（strictモード）──
+            self.root.after(0, lambda: self.status_var.set("MP3を再構築中..."))
+            mp3_ok = combine_wavs_to_mp3(
+                self.work_dir, self.mp3_path, len(self.segments))
+            if not mp3_ok:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "MP3再構築失敗",
+                    "MP3の再構築に失敗しました。既存のMP3と原稿はそのまま残しています。\n"
+                    "もう一度「修正の適用」を押してください。"))
+                return
 
             self.root.after(0, self._finish_direct_edit_mode)
             self.root.after(0, lambda tc=total_gen: self.status_var.set(
@@ -1655,6 +2383,12 @@ class PodcastReviewerApp:
             self.root.after(0, lambda err=str(e): self.status_var.set(
                 f"直接修正エラー: {err[:80]}"))
             self.root.after(0, self._finish_direct_edit_mode)
+        finally:
+            # 取得したロックを必ず解放する（_wav_lock は修正入力等が待っている可能性あり）
+            try:
+                self._wav_lock.release()
+            except Exception:
+                pass
 
     def _cancel_direct_edit(self):
         """直接修正を中止 — テキストを元に戻し中断位置から再生再開"""

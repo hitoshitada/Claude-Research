@@ -766,31 +766,49 @@ def extract_chart_data(image_data: bytes, api_key: str) -> dict | None:
         }
         抽出失敗時は None。
     """
-    try:
-        import json as _json
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=image_data, mime_type=_img_mime(image_data)),
-                types.Part.from_text(
-                    "Extract all data from the chart/graph in this image.\n"
-                    "Return ONLY a valid JSON object with this structure:\n"
-                    '{"chart_type":"bar|line|pie|area|scatter|other",'
-                    '"title":"chart title or empty","x_label":"","y_label":"",'
-                    '"unit":"unit of values (%, billion USD, etc.) or empty",'
-                    '"series":[{"name":"series name or empty",'
-                    '"data":[{"label":"category or x-value","value":123.4}]}]}'
-                    "\nBe precise with all numeric values. No markdown, no explanation."
-                ),
-            ],
-            config={"response_mime_type": "application/json"},
-        )
-        text = re.sub(r'^```(?:json)?\s*', '', response.text.strip())
-        text = re.sub(r'\s*```$', '', text)
-        return _json.loads(text)
-    except Exception:
-        return None
+    # 試行するモデルのリスト（上から順に試す）
+    _CHART_MODELS = [
+        "gemini-2.5-flash-preview-04-17",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    ]
+    import json as _json
+
+    last_err = None
+    for _model in _CHART_MODELS:
+        try:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=_model,
+                contents=[
+                    types.Part.from_bytes(data=image_data, mime_type=_img_mime(image_data)),
+                    types.Part.from_text(
+                        "This image contains one or more charts/graphs (may be a compound infographic).\n"
+                        "Focus on the LARGEST or MOST PROMINENT chart in the image.\n"
+                        "Extract all numerical data from that chart.\n"
+                        "Return ONLY a valid JSON object with this structure:\n"
+                        '{"chart_type":"bar|line|pie|area|scatter|other",'
+                        '"title":"chart title or empty","x_label":"","y_label":"",'
+                        '"unit":"unit of values (%, billion USD, etc.) or empty",'
+                        '"series":[{"name":"series name or empty",'
+                        '"data":[{"label":"category or x-value","value":123.4}]}]}'
+                        "\nBe precise with all numeric values. No markdown, no explanation.\n"
+                        "If the image has NO chart at all, return: "
+                        '{"chart_type":"other","title":"","x_label":"","y_label":"","unit":"","series":[]}'
+                    ),
+                ],
+                config={"response_mime_type": "application/json"},
+            )
+            text = re.sub(r'^```(?:json)?\s*', '', response.text.strip())
+            text = re.sub(r'\s*```$', '', text)
+            result = _json.loads(text)
+            return result
+        except Exception as e:
+            last_err = e
+            continue  # 次のモデルを試す
+
+    # 全モデルが失敗した場合は最後のエラーを付けて None を返す
+    raise RuntimeError(f"extract_chart_data failed with all models. Last error: {last_err}")
 
 
 def render_chart_image(chart_data: dict,
@@ -1001,28 +1019,32 @@ def generate_image_with_chart(
     return output_path
 
 
+
+
 # =====================================================================
-# メインGUIアプリケーション
+# メインGUIアプリケーション（新版）
 # =====================================================================
 class WPUploaderApp(tk.Tk):
-    """WordPress記事アップローダー"""
+    """WordPress アップローダー（新版）
+
+    3つの独立したアップロードボタンを提供:
+    1. 採用記事を一括アップロード（Chromeプレビューなし・確認なし）
+    2. WeeklyReport + ポッドキャストをアップロード（新規投稿・先頭移動）
+    3. 全てまとめてアップロード（1→2を順に実行）
+    """
 
     def __init__(self):
         super().__init__()
-
-        self.title("WordPress 記事アップローダー")
-        self.geometry("780x650")
+        self.title("WordPress アップローダー")
+        self.geometry("960x720")
         self.resizable(True, True)
         self.configure(bg="#f0f0f0")
 
         # 状態
-        self.html_files: list[Path] = []
-        self.current_index = 0
-        self.current_article: dict = {}
         self.wp_client: WordPressClient | None = None
-        self.detected_category: str | None = None  # フォルダ名から判定
-        self.selected_folder: Path | None = None   # 選択中のフォルダ
-        self._chrome_process: subprocess.Popen | None = None
+        self.selected_folder: Path | None = None
+        self.detected_category: str | None = None
+        self._uploading = False
 
         self._build_ui()
         self._init_wp_client()
@@ -1031,9 +1053,6 @@ class WPUploaderApp(tk.Tk):
     # UI構築
     # ---------------------------------------------------------------
     def _build_ui(self):
-        style = ttk.Style()
-        style.configure("Green.TButton", font=("Meiryo", 10, "bold"))
-
         # --- WordPress設定 ---
         wp_frame = ttk.LabelFrame(self, text="WordPress設定", padding=8)
         wp_frame.pack(fill="x", padx=10, pady=(10, 4))
@@ -1043,102 +1062,94 @@ class WPUploaderApp(tk.Tk):
         ttk.Label(row0, text="サイトURL:").pack(side="left")
         self.wp_url_var = tk.StringVar(value=WP_URL)
         ttk.Entry(row0, textvariable=self.wp_url_var, width=35).pack(
-            side="left", padx=(4, 12)
-        )
+            side="left", padx=(4, 12))
         ttk.Label(row0, text="ユーザー名:").pack(side="left")
         self.wp_user_var = tk.StringVar(value=WP_USERNAME)
         ttk.Entry(row0, textvariable=self.wp_user_var, width=18).pack(
-            side="left", padx=(4, 0)
-        )
+            side="left", padx=(4, 0))
 
         row1 = ttk.Frame(wp_frame)
         row1.pack(fill="x", pady=(4, 0))
         ttk.Label(row1, text="アプリパスワード:").pack(side="left")
         self.wp_pass_var = tk.StringVar(value=WP_APP_PASSWORD)
         ttk.Entry(row1, textvariable=self.wp_pass_var, width=35, show="*").pack(
-            side="left", padx=(4, 12)
-        )
-        ttk.Button(row1, text="接続テスト", command=self._test_wp_connection).pack(
-            side="left"
-        )
+            side="left", padx=(4, 12))
+        ttk.Button(row1, text="接続テスト",
+                   command=self._test_wp_connection).pack(side="left")
         self.wp_status_label = ttk.Label(row1, text="", foreground="gray")
         self.wp_status_label.pack(side="left", padx=8)
 
         # --- フォルダ選択 ---
-        folder_frame = ttk.LabelFrame(self, text="フォルダ選択", padding=8)
+        folder_frame = ttk.LabelFrame(self, text="対象フォルダ", padding=8)
         folder_frame.pack(fill="x", padx=10, pady=4)
 
-        ttk.Button(folder_frame, text="フォルダを選択", command=self._select_folder).pack(
-            side="left"
-        )
-        self.folder_label = ttk.Label(folder_frame, text="未選択", foreground="gray")
+        ttk.Button(folder_frame, text="フォルダを選択",
+                   command=self._select_folder).pack(side="left")
+        self.folder_label = ttk.Label(
+            folder_frame, text="未選択", foreground="gray")
         self.folder_label.pack(side="left", padx=10)
-        self.file_count_label = ttk.Label(folder_frame, text="")
-        self.file_count_label.pack(side="right")
+        self.folder_info_label = ttk.Label(
+            folder_frame, text="", foreground="#1565C0")
+        self.folder_info_label.pack(side="right")
 
-        # --- 記事情報 ---
-        article_frame = ttk.LabelFrame(self, text="現在の記事", padding=8)
-        article_frame.pack(fill="x", padx=10, pady=4)
+        # --- アップロードアクション ---
+        action_frame = ttk.LabelFrame(self, text="アップロード操作", padding=10)
+        action_frame.pack(fill="x", padx=10, pady=4)
 
-        self.progress_label = ttk.Label(
-            article_frame, text="記事: -/-", font=("Meiryo", 10)
-        )
-        self.progress_label.pack(anchor="w")
+        btn_row = tk.Frame(action_frame, bg="#f0f0f0")
+        btn_row.pack(fill="x")
 
-        self.title_label = ttk.Label(
-            article_frame, text="", font=("Meiryo", 11, "bold"), wraplength=720
-        )
-        self.title_label.pack(anchor="w", pady=(4, 0))
-
-        self.meta_label = ttk.Label(article_frame, text="", foreground="#666")
-        self.meta_label.pack(anchor="w")
-
-        # --- アクションボタン ---
-        btn_frame = ttk.Frame(self, padding=(10, 6))
-        btn_frame.pack(fill="x")
-
-        self.complete_btn = tk.Button(
-            btn_frame,
-            text="  閲覧完了  ",
-            command=self._on_reading_complete,
+        self.btn_articles = tk.Button(
+            btn_row,
+            text="📰 採用記事を\n一括アップロード",
+            command=self._upload_articles_batch,
             state="disabled",
-            bg="#4CAF50",
-            fg="white",
+            bg="#2E7D32", fg="white",
             font=("Meiryo", 11, "bold"),
-            relief="raised",
-            padx=16,
-            pady=6,
+            relief="raised", padx=12, pady=10,
         )
-        self.complete_btn.pack(side="left", padx=5)
+        self.btn_articles.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        self.skip_btn = ttk.Button(
-            btn_frame,
-            text="スキップ（次の記事へ）",
-            command=self._next_article,
+        self.btn_weekly = tk.Button(
+            btn_row,
+            text="📊 WeeklyReport を\nアップロード",
+            command=self._upload_weekly_report,
             state="disabled",
+            bg="#1565C0", fg="white",
+            font=("Meiryo", 11, "bold"),
+            relief="raised", padx=12, pady=10,
         )
-        self.skip_btn.pack(side="left", padx=5)
+        self.btn_weekly.pack(side="left", fill="x", expand=True, padx=4)
 
-        self.skip_all_btn = tk.Button(
-            btn_frame,
-            text="すべての記事をスキップ",
-            command=self._skip_all_articles,
+        self.btn_all = tk.Button(
+            btn_row,
+            text="🚀 全てまとめて\nアップロード",
+            command=self._upload_all,
             state="disabled",
-            bg="#FF9800",
-            fg="white",
-            font=("Meiryo", 10),
-            relief="raised",
-            padx=10,
-            pady=4,
+            bg="#E65100", fg="white",
+            font=("Meiryo", 11, "bold"),
+            relief="raised", padx=12, pady=10,
         )
-        self.skip_all_btn.pack(side="left", padx=15)
+        self.btn_all.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        # ステータスと進行バー
+        status_frame = tk.Frame(action_frame, bg="#f0f0f0")
+        status_frame.pack(fill="x", pady=(8, 0))
+        self.status_var = tk.StringVar(value="フォルダを選択してください")
+        ttk.Label(status_frame, textvariable=self.status_var,
+                  font=("Meiryo", 9)).pack(anchor="w")
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(
+            status_frame, variable=self.progress_var,
+            maximum=100, mode="determinate",
+        )
+        self.progress_bar.pack(fill="x", pady=(4, 0))
 
         # --- ログ ---
         log_frame = ttk.LabelFrame(self, text="ログ", padding=4)
         log_frame.pack(fill="both", expand=True, padx=10, pady=(4, 10))
-
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=10, font=("Consolas", 9), wrap="word"
+            log_frame, height=16, font=("Consolas", 9), wrap="word"
         )
         self.log_text.pack(fill="both", expand=True)
 
@@ -1146,26 +1157,25 @@ class WPUploaderApp(tk.Tk):
     # WordPress接続
     # ---------------------------------------------------------------
     def _init_wp_client(self):
-        """初期設定からWPクライアントを生成"""
-        url = self.wp_url_var.get().strip()
+        url  = self.wp_url_var.get().strip()
         user = self.wp_user_var.get().strip()
-        pw = self.wp_pass_var.get().strip()
+        pw   = self.wp_pass_var.get().strip()
         if url and user and pw:
             self.wp_client = WordPressClient(url, user, pw)
 
     def _build_wp_client(self) -> bool:
-        """UIの入力値からWPクライアントを再構築"""
-        url = self.wp_url_var.get().strip()
+        url  = self.wp_url_var.get().strip()
         user = self.wp_user_var.get().strip()
-        pw = self.wp_pass_var.get().strip()
+        pw   = self.wp_pass_var.get().strip()
         if not (url and user and pw):
-            messagebox.showerror("エラー", "WordPress設定（URL・ユーザー名・アプリパスワード）をすべて入力してください")
+            messagebox.showerror(
+                "エラー",
+                "WordPress設定（URL・ユーザー名・アプリパスワード）をすべて入力してください")
             return False
         self.wp_client = WordPressClient(url, user, pw)
         return True
 
     def _test_wp_connection(self):
-        """接続テスト"""
         if not self._build_wp_client():
             return
         self.wp_status_label.config(text="接続中...", foreground="gray")
@@ -1187,991 +1197,378 @@ class WPUploaderApp(tk.Tk):
         else:
             self.wp_status_label.config(text="接続失敗", foreground="red")
             self._log(f"✗ WordPress接続失敗: {error}")
-            messagebox.showerror("接続失敗", f"WordPressに接続できませんでした\n{error}")
+            messagebox.showerror("接続失敗",
+                                 f"WordPressに接続できませんでした\n{error}")
 
     # ---------------------------------------------------------------
-    # フォルダ選択 & 記事一覧
+    # フォルダ選択
     # ---------------------------------------------------------------
     def _select_folder(self):
         folder = filedialog.askdirectory(
             initialdir=str(OUTPUT_DIR),
             title="調査アウトプットフォルダを選択",
         )
-        if not folder:
-            return
-        self._load_folder_path(Path(folder))
+        if folder:
+            self._load_folder_path(Path(folder))
 
     def _load_folder_path(self, folder_path: Path):
-        """フォルダを読み込む（ファイル選択ダイアログ不要版）"""
         self.selected_folder = folder_path
         self.folder_label.config(text=folder_path.name, foreground="black")
 
-        # HTMLファイル取得（概要ファイル・不採用ファイルを除外、ソート済み）
-        self.html_files = sorted(
-            f
-            for f in folder_path.glob("*.html")
-            if not f.name.endswith("_概要.html")
-            and not f.name.startswith("不採用_")
+        # 採用記事HTMLを収集（不採用_・_概要 を除外）
+        html_files = sorted(
+            f for f in folder_path.glob("*.html")
+            if not f.name.startswith("不採用_")
+            and not f.name.endswith("_概要.html")
         )
+        # アイキャッチ画像があるものだけをアップロード対象としてカウント
+        articles_with_eyecatch = [
+            f for f in html_files if self._find_eyecatch_file(f)]
 
-        count = len(self.html_files)
-        self.file_count_label.config(text=f"{count}件のHTMLファイル")
+        # PDF・MP3を確認
+        pdf_files = [f for f in folder_path.glob("*.pdf")
+                     if "ウィークリーレポート" in f.name]
+        mp3_files = [f for f in folder_path.glob("*.mp3")
+                     if "ポッドキャスト" in f.name
+                     and not f.stem.endswith("_original")]
 
-        if count == 0:
-            messagebox.showwarning("警告", "HTMLファイルが見つかりません")
-            return
-
-        # フォルダ名からカテゴリー自動判定
+        # カテゴリー自動判定
         self.detected_category = detect_category(folder_path.name)
-        cat_msg = f"カテゴリー: {self.detected_category}" if self.detected_category else "カテゴリー: 未判定"
-        self._log(f"フォルダ選択: {folder_path.name}（{count}件）| {cat_msg}")
-        self.current_index = 0
-        self._show_current_article()
+        cat_msg = self.detected_category or "（カテゴリー未判定）"
 
-    # ---------------------------------------------------------------
-    # 記事表示
-    # ---------------------------------------------------------------
-    def _show_current_article(self):
-        if self.current_index >= len(self.html_files):
-            self._log("=" * 40)
-            self._log("すべての記事の処理が完了しました")
-            self.progress_label.config(text="完了")
-            self.title_label.config(text="すべての記事を処理しました")
-            self.meta_label.config(text="")
-            self.complete_btn.config(state="disabled")
-            self.skip_btn.config(state="disabled")
-            self.skip_all_btn.config(state="disabled")
-            # PDFウィークリーレポートのアップロード処理へ
-            self._handle_pdf_upload()
-            return
+        info_parts = [f"記事: {len(articles_with_eyecatch)}件"]
+        if pdf_files:
+            info_parts.append(f"PDF: {len(pdf_files)}件")
+        if mp3_files:
+            info_parts.append(f"ポッドキャスト: {len(mp3_files)}件")
+        info_parts.append(cat_msg)
+        self.folder_info_label.config(text=" | ".join(info_parts))
 
-        filepath = self.html_files[self.current_index]
-        self.current_article = parse_article_html(filepath)
+        self._log(f"フォルダ: {folder_path.name}")
+        self._log(f"  採用記事（アイキャッチあり）: {len(articles_with_eyecatch)}件")
+        self._log(f"  PDF: {len(pdf_files)}件 / MP3: {len(mp3_files)}件")
+        self._log(f"  カテゴリー: {cat_msg}")
 
-        total = len(self.html_files)
-        idx = self.current_index + 1
-
-        self.progress_label.config(text=f"記事: {idx}/{total}")
-        self.title_label.config(text=self.current_article["title"])
-        self.meta_label.config(
-            text=(
-                f'{self.current_article["publish_date"]} | '
-                f'{self.current_article["source_name"]} | '
-                f'{self.current_article["country"]}'
-            )
-        )
-
-        # Chromeでファイルを開く（独立ウィンドウで起動し、後でプロセスごと閉じる）
-        file_url = filepath.as_uri()
-        self._open_chrome(file_url)
-        self._log(f"[{idx}/{total}] ブラウザで表示: {filepath.name}")
-
-        self.complete_btn.config(state="normal")
-        self.skip_btn.config(state="normal")
-        self.skip_all_btn.config(state="normal")
-
-    # ---------------------------------------------------------------
-    # Chrome制御（一時プロファイルで独立プロセスとして起動）
-    # ---------------------------------------------------------------
-    def _open_chrome(self, url: str):
-        """Chromeを一時プロファイルで独立起動する（確実に閉じられる）"""
-        self._close_chrome()  # 前のがあれば閉じる
-
-        chrome_paths = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.expandvars(
-                r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
-            ),
-        ]
-        chrome_exe = None
-        for p in chrome_paths:
-            if os.path.exists(p):
-                chrome_exe = p
-                break
-
-        if chrome_exe:
-            # 一時プロファイルを作成してChromeを独立プロセスで起動
-            # これにより既存Chromeに統合されず、terminate()で確実に閉じられる
-            self._chrome_tmp_dir = tempfile.mkdtemp(prefix="chrome_preview_")
-            self._chrome_process = subprocess.Popen(
-                [
-                    chrome_exe,
-                    f"--user-data-dir={self._chrome_tmp_dir}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    url,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            import webbrowser
-            webbrowser.open(url)
-
-    def _close_chrome(self):
-        """起動したChromeプロセスを終了してウィンドウを閉じる"""
-        if self._chrome_process and self._chrome_process.poll() is None:
-            try:
-                self._chrome_process.terminate()
-                self._chrome_process.wait(timeout=5)
-            except Exception:
-                try:
-                    self._chrome_process.kill()
-                    self._chrome_process.wait(timeout=3)
-                except Exception:
-                    pass
-        self._chrome_process = None
-
-        # 一時プロファイルを削除
-        tmp_dir = getattr(self, "_chrome_tmp_dir", None)
-        if tmp_dir and os.path.exists(tmp_dir):
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
-            self._chrome_tmp_dir = None
-
-    # ---------------------------------------------------------------
-    # 閲覧完了 → アップロード判定
-    # ---------------------------------------------------------------
-    def _on_reading_complete(self):
-        self._close_chrome()
-        self.complete_btn.config(state="disabled")
-        self.skip_btn.config(state="disabled")
-
-        # アップロードするか確認
-        upload = messagebox.askyesno(
-            "アップロード確認",
-            f"この記事をWordPressにアップロードしますか？\n\n"
-            f"「{self.current_article['title']}」",
-        )
-
-        if not upload:
-            self._log("→ アップしない（スキップ）")
-            self._next_article()
-            return
-
-        # WP接続確認
-        if not self._build_wp_client():
-            self._enable_buttons()
-            return
-
-        # アイキャッチ画像の優先順位:
-        # 1. {stem}_eyecatch.png/jpg （article_curator.py が生成）
-        # 2. 通常の画像選択ダイアログ（_ask_photo_choice）
-        filepath = self.current_article["filepath"]
-        eyecatch_path = self._find_eyecatch_file(filepath)
-        if eyecatch_path:
-            self._log(f"アイキャッチ画像を使用: {eyecatch_path.name}")
-            self._upload_with_eyecatch_file(eyecatch_path)
-        else:
-            self._log("アイキャッチ画像なし → 画像選択ダイアログを表示")
-            self._ask_photo_choice()
+        # ボタン有効化
+        self.btn_articles.config(state="normal")
+        self.btn_weekly.config(state="normal")
+        self.btn_all.config(state="normal")
+        self.status_var.set("アップロードボタンを押してください")
+        self.progress_var.set(0)
 
     def _find_eyecatch_file(self, html_path: Path) -> "Path | None":
-        """記事HTMLに対応する _eyecatch.png/jpg を探す"""
+        """対応する _eyecatch.png/jpg/jpeg を返す（なければ None）"""
         for ext in [".png", ".jpg", ".jpeg"]:
-            candidate = html_path.parent / f"{html_path.stem}_eyecatch{ext}"
-            if candidate.exists():
-                return candidate
+            c = html_path.parent / f"{html_path.stem}_eyecatch{ext}"
+            if c.exists():
+                return c
         return None
 
-    def _upload_with_eyecatch_file(self, eyecatch_path: Path):
-        """アイキャッチファイルを直接アップロード"""
-        self._log(f"アイキャッチ画像をアップロード中: {eyecatch_path.name}")
-        ext = eyecatch_path.suffix.lower()
-        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
-        mime = mime_map.get(ext, "image/png")
-        image_data = eyecatch_path.read_bytes()
-        self._do_wp_upload(image_data, eyecatch_path.name, mime)
-
-    def _ask_photo_choice(self):
-        """アイキャッチ画像の選択（4択ダイアログ）"""
-        has_image = bool(self.current_article.get("image_url"))
-
-        if not has_image:
-            # 画像なし → AI生成 or ライブラリ選択の2択
-            no_img_result = {"value": None}
-            dlg2 = tk.Toplevel(self)
-            dlg2.title("画像の選択")
-            dlg2.grab_set()
-            dlg2.resizable(False, False)
-            dlg2.geometry("380x160")
-
-            ttk.Label(
-                dlg2,
-                text="記事に画像がありません。\nどちらで画像を用意しますか？",
-                font=("Meiryo", 10),
-                justify="center",
-            ).pack(pady=(18, 12))
-
-            def _choose2(v):
-                no_img_result["value"] = v
-                dlg2.destroy()
-
-            row = ttk.Frame(dlg2)
-            row.pack()
-            tk.Button(
-                row, text="WPライブラリから選択",
-                bg="#00695C", fg="white", font=("Meiryo", 9),
-                padx=8, pady=5,
-                command=lambda: _choose2("library"),
-            ).pack(side="left", padx=8)
-            tk.Button(
-                row, text="AIで新規生成",
-                bg="#388E3C", fg="white", font=("Meiryo", 9),
-                padx=8, pady=5,
-                command=lambda: _choose2("ai"),
-            ).pack(side="left", padx=8)
-
-            dlg2.protocol("WM_DELETE_WINDOW", lambda: _choose2("cancel"))
-            self.wait_window(dlg2)
-
-            choice2 = no_img_result["value"]
-            if choice2 == "library":
-                self._pick_from_media_library(on_cancel=self._ask_photo_choice)
-            elif choice2 == "ai":
-                self._generate_ai_image()
-            else:
-                self._log("→ 画像選択キャンセル、記事スキップ")
-                self._next_article()
+    # ---------------------------------------------------------------
+    # ① 採用記事を一括アップロード
+    # ---------------------------------------------------------------
+    def _upload_articles_batch(self):
+        if not self.selected_folder:
+            messagebox.showwarning("エラー", "フォルダを選択してください")
+            return
+        if not self._build_wp_client():
             return
 
-        # ── 4択ダイアログを自前で構築 ──
-        choice_result = {"value": None}
+        # アップロード対象の記事を収集
+        html_files = sorted(
+            f for f in self.selected_folder.glob("*.html")
+            if not f.name.startswith("不採用_")
+            and not f.name.endswith("_概要.html")
+        )
+        target_articles = [
+            (f, self._find_eyecatch_file(f)) for f in html_files]
 
-        dlg = tk.Toplevel(self)
-        dlg.title("アイキャッチ画像の選択")
-        dlg.grab_set()
-        dlg.resizable(False, False)
-        dlg.geometry("440x220")
-
-        ttk.Label(
-            dlg,
-            text="記事の画像をどのように使用しますか？",
-            font=("Meiryo", 10),
-            wraplength=410,
-        ).pack(pady=(16, 10))
-
-        def _choose(v):
-            choice_result["value"] = v
-            dlg.destroy()
-
-        # 1行目: 記事の既存画像 / WPライブラリ
-        row1 = ttk.Frame(dlg)
-        row1.pack(pady=4)
-        tk.Button(
-            row1, text="記事の画像をそのまま使用",
-            bg="#1565c0", fg="white", font=("Meiryo", 9),
-            padx=8, pady=5, width=20,
-            command=lambda: _choose("existing"),
-        ).pack(side="left", padx=6)
-        tk.Button(
-            row1, text="WPライブラリから選択",
-            bg="#00695C", fg="white", font=("Meiryo", 9),
-            padx=8, pady=5, width=18,
-            command=lambda: _choose("library"),
-        ).pack(side="left", padx=6)
-
-        # 2行目: グラフ生成 / AI生成
-        row2 = ttk.Frame(dlg)
-        row2.pack(pady=4)
-        tk.Button(
-            row2, text="グラフ読取＆新規生成",
-            bg="#7B1FA2", fg="white", font=("Meiryo", 9),
-            padx=8, pady=5, width=20,
-            command=lambda: _choose("chart"),
-        ).pack(side="left", padx=6)
-        tk.Button(
-            row2, text="AI新規生成",
-            bg="#388E3C", fg="white", font=("Meiryo", 9),
-            padx=8, pady=5, width=18,
-            command=lambda: _choose("ai"),
-        ).pack(side="left", padx=6)
-
-        # キャンセル（×ボタン）
-        dlg.protocol("WM_DELETE_WINDOW", lambda: _choose("cancel"))
-        self.wait_window(dlg)
-
-        choice = choice_result["value"]
-        if choice == "existing":
-            self._upload_with_existing_image()
-        elif choice == "library":
-            self._pick_from_media_library(on_cancel=self._ask_photo_choice)
-        elif choice == "chart":
-            self._recreate_chart_image()
-        elif choice == "ai":
-            self._generate_ai_image()
-        else:
-            self._log("→ 画像選択キャンセル、記事スキップ")
-            self._next_article()
-
-    # ---------------------------------------------------------------
-    # WPメディアライブラリから画像を選択
-    # ---------------------------------------------------------------
-    def _pick_from_media_library(self, on_cancel=None):
-        """WPメディアライブラリをサムネイルグリッドで表示し、選択した画像でアップロード"""
-        try:
-            from PIL import Image, ImageTk
-        except ImportError:
-            messagebox.showerror("エラー", "Pillowが必要です: pip install Pillow")
-            self._next_article()
+        if not target_articles:
+            messagebox.showwarning("対象なし",
+                                   "アップロード対象の記事が見つかりません")
             return
 
-        import io as _io
+        eyecatch_count   = sum(1 for _, e in target_articles if e)
+        no_eyecatch_count = len(target_articles) - eyecatch_count
 
-        result = {"media_id": None}
-        photo_refs = []      # GC防止用
+        msg = f"採用記事 {len(target_articles)} 件をWordPressにアップロードします。\n"
+        msg += f"  ・アイキャッチあり（アップロード対象）: {eyecatch_count}件\n"
+        if no_eyecatch_count:
+            msg += f"  ・アイキャッチなし（スキップ）: {no_eyecatch_count}件\n"
+        msg += f"\nカテゴリー: {self.detected_category or '未判定'}\n\n続行しますか？"
 
-        dlg = tk.Toplevel(self)
-        dlg.title("メディアライブラリから画像を選択")
-        dlg.geometry("880x640")
-        dlg.grab_set()
+        if not messagebox.askyesno("記事アップロード確認", msg):
+            return
 
-        # ── ステータスバー ──
-        status_var = tk.StringVar(value="メディアライブラリを読み込み中...")
-        ttk.Label(dlg, textvariable=status_var, font=("Meiryo", 9)).pack(
-            padx=10, pady=(8, 2), anchor="w")
-
-        # ── スクロール可能なサムネイルグリッド ──
-        outer = ttk.Frame(dlg, relief="sunken", borderwidth=1)
-        outer.pack(fill="both", expand=True, padx=10, pady=4)
-
-        canvas = tk.Canvas(outer, bg="#f5f5f5", highlightthickness=0)
-        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        inner = tk.Frame(canvas, bg="#f5f5f5")
-        inner_win = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def _on_inner_resize(e=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        def _on_canvas_resize(e=None):
-            canvas.itemconfig(inner_win, width=canvas.winfo_width())
-        inner.bind("<Configure>", _on_inner_resize)
-        canvas.bind("<Configure>", _on_canvas_resize)
-
-        def _on_wheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_wheel)
-
-        # ── 下部: キャンセルボタン ──
-        bot = ttk.Frame(dlg)
-        bot.pack(fill="x", padx=10, pady=(2, 8))
-        ttk.Label(bot, text="画像をクリックして選択（選択と同時にダイアログが閉じます）",
-                  font=("Meiryo", 8), foreground="gray").pack(side="left")
-        ttk.Button(bot, text="キャンセル",
-                   command=lambda: (canvas.unbind_all("<MouseWheel>"),
-                                    dlg.destroy())).pack(side="right")
-
-        COLS = 5
-        TW, TH = 150, 105   # サムネイル表示サイズ
-
-        def _on_select(mid, name):
-            result["media_id"] = mid
-            canvas.unbind_all("<MouseWheel>")
-            dlg.destroy()
-
-        def _load():
-            """バックグラウンドでメディア一覧取得 → サムネイル描画"""
-            try:
-                sess = requests.Session()
-                sess.auth = self.wp_client.auth
-                api = self.wp_client.api_url
-
-                # 全画像の一覧取得
-                all_items = []
-                page = 1
-                while True:
-                    resp = sess.get(
-                        f"{api}/media",
-                        params={"per_page": 100, "page": page,
-                                "media_type": "image"},
-                        timeout=30,
-                    )
-                    if resp.status_code == 400:
-                        break
-                    total_pages = int(resp.headers.get("X-WP-TotalPages", 1))
-                    batch = resp.json()
-                    if not batch:
-                        break
-                    all_items.extend(batch)
-                    n = len(all_items)
-                    dlg.after(0, lambda p=page, tp=total_pages, cnt=n:
-                        status_var.set(
-                            f"一覧取得中... {cnt}件 (ページ {p}/{tp})"))
-                    if page >= total_pages:
-                        break
-                    page += 1
-
-                total = len(all_items)
-                dlg.after(0, lambda: status_var.set(
-                    f"サムネイルを読み込み中... 0/{total}"))
-
-                for idx, item in enumerate(all_items):
-                    # サムネイルURLを優先順位付きで取得
-                    sizes = item.get("media_details", {}).get("sizes", {})
-                    thumb_url = (
-                        sizes.get("thumbnail", {}).get("source_url")
-                        or sizes.get("medium", {}).get("source_url")
-                        or item.get("source_url", "")
-                    )
-                    mid = item["id"]
-                    name = item.get("title", {}).get("rendered", "") or f"media_{mid}"
-
-                    # サムネイル画像を取得してリサイズ
-                    try:
-                        r = sess.get(thumb_url, timeout=15)
-                        r.raise_for_status()
-                        img = Image.open(_io.BytesIO(r.content)).convert("RGB")
-                        img.thumbnail((TW, TH), Image.LANCZOS)
-                        bg = Image.new("RGB", (TW, TH), (220, 220, 220))
-                        bg.paste(img, ((TW - img.width) // 2,
-                                       (TH - img.height) // 2))
-                        photo = ImageTk.PhotoImage(bg)
-                    except Exception:
-                        photo = None
-
-                    # メインスレッドでUI更新
-                    def _add(i=idx, p=photo, m=mid, nm=name):
-                        if not dlg.winfo_exists():
-                            return
-                        if p:
-                            photo_refs.append(p)
-                        row, col = divmod(i, COLS)
-                        cell = tk.Frame(inner, bg="#f5f5f5",
-                                        cursor="hand2" if p else "arrow")
-                        cell.grid(row=row, column=col, padx=3, pady=3)
-                        if p:
-                            lbl = tk.Label(cell, image=p, bg="#f5f5f5",
-                                           cursor="hand2", borderwidth=2,
-                                           relief="groove")
-                            lbl.pack()
-                            lbl.bind("<Button-1>",
-                                     lambda e, mid=m, n=nm: _on_select(mid, n))
-                            lbl.bind("<Enter>",
-                                     lambda e, w=lbl: w.config(relief="solid"))
-                            lbl.bind("<Leave>",
-                                     lambda e, w=lbl: w.config(relief="groove"))
-                        short = (nm[:14] + "…") if len(nm) > 14 else nm
-                        tk.Label(cell, text=short, font=("Meiryo", 7),
-                                 bg="#f5f5f5", fg="#444444",
-                                 wraplength=TW).pack()
-
-                    dlg.after(0, _add)
-
-                    if (idx + 1) % 20 == 0:
-                        dlg.after(0, lambda n=idx + 1, tot=total:
-                            status_var.set(
-                                f"サムネイルを読み込み中... {n}/{tot}"))
-
-                dlg.after(0, lambda tot=total: status_var.set(
-                    f"読み込み完了 — {tot}件。クリックして画像を選択してください。"))
-
-            except Exception as e:
-                dlg.after(0, lambda: status_var.set(f"読み込みエラー: {e}"))
-
-        threading.Thread(target=_load, daemon=True).start()
-
-        dlg.protocol("WM_DELETE_WINDOW",
-                     lambda: (canvas.unbind_all("<MouseWheel>"), dlg.destroy()))
-        self.wait_window(dlg)
-
-        mid = result["media_id"]
-        if mid:
-            self._post_with_media_id(mid)
-        else:
-            self._log("→ ライブラリ選択キャンセル、選択画面に戻ります")
-            if on_cancel:
-                on_cancel()
-            else:
-                self._next_article()
-
-    def _post_with_media_id(self, media_id: int):
-        """既存メディアIDをアイキャッチに使って記事を投稿（画像アップロードなし）"""
-        self._log(f"WPライブラリの画像 (ID: {media_id}) をアイキャッチに設定して投稿...")
+        self._set_uploading(True)
+        self.status_var.set(f"記事をアップロード中... 0/{len(target_articles)}")
+        self.progress_var.set(0)
 
         def task():
             try:
+                self._do_upload_articles(target_articles)
+            except Exception as e:
+                self.after(0, lambda: self._on_error(f"記事アップロード失敗: {e}"))
+            finally:
+                self.after(0, lambda: self._set_uploading(False))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _do_upload_articles(self, target_articles: list):
+        """バックグラウンドで記事を一括アップロードする"""
+        total         = len(target_articles)
+        success_count = 0
+        skip_count    = 0
+
+        # 技術カテゴリーIDを事前に取得（全記事で共通）
+        parent_cat_id: int | None = None
+        if self.detected_category:
+            try:
+                parent_cat_id = self.wp_client.get_or_create_category(
+                    self.detected_category)
+                self._log_safe(
+                    f"  技術カテゴリー: {self.detected_category}"
+                    f" (ID: {parent_cat_id})")
+            except Exception as e:
+                self._log_safe(f"  ⚠ カテゴリー取得失敗: {e}")
+
+        for i, (html_path, eyecatch_path) in enumerate(target_articles, 1):
+            pct = (i - 1) / total * 100
+            self.after(0, lambda p=pct, ii=i, t=total: (
+                self.progress_var.set(p),
+                self.status_var.set(f"記事をアップロード中... {ii}/{t}"),
+            ))
+
+            if not eyecatch_path:
+                self._log_safe(
+                    f"  [{i}/{total}] スキップ（アイキャッチなし）: {html_path.name}")
+                skip_count += 1
+                continue
+
+            self._log_safe(f"[{i}/{total}] {html_path.name}")
+
+            try:
+                article = parse_article_html(html_path)
+
+                # アイキャッチ画像をWPメディアにアップロード
+                self._log_safe(f"  アイキャッチ: {eyecatch_path.name}")
+                mime_map = {
+                    ".png":  "image/png",
+                    ".jpg":  "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                }
+                mime     = mime_map.get(eyecatch_path.suffix.lower(), "image/png")
+                media_id = self.wp_client.upload_media(
+                    eyecatch_path.read_bytes(), eyecatch_path.name, mime)
+                self._log_safe(f"  メディア ID: {media_id}")
+
+                # カテゴリーIDを構築
+                category_ids: list[int] = []
+                if parent_cat_id:
+                    category_ids.append(parent_cat_id)
+
+                # 記事内容から企業動向/市場動向/新技術サブカテゴリーを判定
+                content_cat = detect_content_category(article)
+                if content_cat:
+                    try:
+                        sub_id = self.wp_client.get_or_create_category(
+                            content_cat,
+                            parent_id=parent_cat_id,
+                        )
+                        if sub_id:
+                            category_ids.append(sub_id)
+                            self._log_safe(
+                                f"  カテゴリー: {self.detected_category}"
+                                f" > {content_cat}")
+                    except Exception:
+                        pass
+                else:
+                    self._log_safe(
+                        f"  カテゴリー: {self.detected_category}"
+                        f"（サブカテゴリー未判定）")
+
+                # 投稿コンテンツ（緑帯ヘッダー付き）
                 content = format_wp_content(
-                    self.current_article["summary"],
-                    self.current_article["detail"],
-                    self.current_article.get("source_url", ""),
+                    article["summary"],
+                    article["detail"],
+                    article.get("source_url", ""),
                 )
 
-                category_ids = []
-                parent_cat_id = None
-
-                if self.detected_category:
-                    parent_cat_id = self.wp_client.get_or_create_category(
-                        self.detected_category)
-                    if parent_cat_id:
-                        category_ids.append(parent_cat_id)
-                        self._log_safe(
-                            f"  親カテゴリー: {self.detected_category}"
-                            f" (ID: {parent_cat_id})")
-
-                content_cat = detect_content_category(self.current_article)
-                if content_cat and parent_cat_id:
-                    cid = self.wp_client.get_or_create_category(
-                        content_cat, parent_id=parent_cat_id)
-                    if cid:
-                        category_ids.append(cid)
-                        self._log_safe(
-                            f"  記事種別: {self.detected_category} > {content_cat}"
-                            f" (ID: {cid})")
-                elif content_cat:
-                    cid = self.wp_client.get_or_create_category(content_cat)
-                    if cid:
-                        category_ids.append(cid)
-
+                # 投稿（公開）
                 result = self.wp_client.create_post(
-                    title=self.current_article["title"],
+                    title=article["title"],
                     content=content,
                     featured_media_id=media_id,
                     category_ids=category_ids if category_ids else None,
-                    status="draft",
+                    status="publish",
                 )
-                post_id = result.get("id", "?")
+                post_id   = result.get("id", "?")
                 post_link = result.get("link", "")
-                self.after(0, lambda: self._on_upload_success(post_id, post_link))
-            except Exception as e:
-                self.after(0, lambda: self._on_error(str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    # ---------------------------------------------------------------
-    # 既存画像でアップロード
-    # ---------------------------------------------------------------
-    def _upload_with_existing_image(self):
-        self._log("既存画像をダウンロード中...")
-
-        def task():
-            try:
-                img_url = self.current_article["image_url"]
-                resp = requests.get(
-                    img_url,
-                    timeout=15,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                resp.raise_for_status()
-
-                image_data = resp.content
-                content_type = resp.headers.get("Content-Type", "image/jpeg")
-                if "jpeg" in content_type or "jpg" in content_type:
-                    ext = "jpg"
-                    mime = "image/jpeg"
-                elif "png" in content_type:
-                    ext = "png"
-                    mime = "image/png"
-                elif "webp" in content_type:
-                    ext = "webp"
-                    mime = "image/webp"
-                else:
-                    ext = "jpg"
-                    mime = "image/jpeg"
-
-                filename = self.current_article["filepath"].stem + f".{ext}"
-                self.after(0, lambda: self._do_wp_upload(image_data, filename, mime))
-            except Exception as e:
-                self.after(
-                    0,
-                    lambda: self._on_error(f"画像ダウンロード失敗: {e}"),
-                )
-
-        threading.Thread(target=task, daemon=True).start()
-
-    # ---------------------------------------------------------------
-    # AI画像生成
-    # ---------------------------------------------------------------
-    def _generate_ai_image(self):
-        if not GEMINI_API_KEY:
-            messagebox.showerror(
-                "エラー",
-                "GEMINI_API_KEYが.envに設定されていません",
-            )
-            self._enable_buttons()
-            return
-
-        html_path = self.current_article["filepath"]
-        output_path = html_path.with_suffix(".png")
-
-        self._log("AI画像を生成中（しばらくお待ちください）...")
-
-        def task():
-            try:
-                generate_image_with_gemini(
-                    GEMINI_API_KEY,
-                    self.current_article["title"],
-                    self.current_article["summary"],
-                    output_path,
-                )
-                self.after(0, lambda: self._confirm_generated_image(output_path))
-            except Exception as e:
-                self.after(0, lambda: self._on_error(f"画像生成失敗: {e}"))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    # ---------------------------------------------------------------
-    # グラフ読取 → 新規画像生成
-    # ---------------------------------------------------------------
-    def _recreate_chart_image(self):
-        """元記事画像からグラフを読み取り、新しい合成画像を生成する"""
-        if not GEMINI_API_KEY:
-            messagebox.showerror("エラー", "GEMINI_API_KEYが.envに設定されていません")
-            self._enable_buttons()
-            return
-
-        img_url = self.current_article.get("image_url", "")
-        if not img_url:
-            self._log("記事に画像URLがないため、AI新規生成に切り替えます")
-            self._generate_ai_image()
-            return
-
-        html_path = self.current_article["filepath"]
-        output_path = html_path.with_suffix(".png")
-
-        self._log("元画像をダウンロード中...")
-
-        def task():
-            try:
-                # 1. 元画像をダウンロード
-                resp = requests.get(img_url, timeout=20,
-                                    headers={"User-Agent": "Mozilla/5.0"})
-                resp.raise_for_status()
-                image_data = resp.content
-                self.after(0, lambda: self._log("グラフの有無を検出中（Gemini Vision）..."))
-
-                # 2. グラフ検出
-                has_chart = detect_chart_in_image(image_data, GEMINI_API_KEY)
-                if not has_chart:
-                    self.after(0, lambda: self._log(
-                        "グラフが検出されませんでした → AI新規生成に切り替えます"))
-                    self.after(0, self._generate_ai_image)
-                    return
-
-                self.after(0, lambda: self._log(
-                    "グラフを検出しました。データを抽出中..."))
-
-                # 3. グラフデータ抽出
-                chart_data = extract_chart_data(image_data, GEMINI_API_KEY)
-                if not chart_data or not chart_data.get("series"):
-                    self.after(0, lambda: self._log(
-                        "グラフデータの抽出に失敗 → AI新規生成に切り替えます"))
-                    self.after(0, self._generate_ai_image)
-                    return
-
-                ctype   = chart_data.get("chart_type", "不明")
-                npoints = sum(len(s.get("data", []))
-                              for s in chart_data.get("series", []))
-                self.after(0, lambda: self._log(
-                    f"グラフ抽出完了: 種類={ctype}, データ点数={npoints}"))
-
-                # 4. Imagen背景 + matplotlibグラフ合成
-                self.after(0, lambda: self._log(
-                    "新しいイラスト+グラフ画像を生成中（しばらくお待ちください）..."))
-                generate_image_with_chart(
-                    GEMINI_API_KEY,
-                    self.current_article["title"],
-                    self.current_article["summary"],
-                    chart_data,
-                    output_path,
-                )
-                self.after(0, lambda: self._confirm_generated_image(output_path))
+                self._log_safe(f"  ✓ 投稿完了 ID:{post_id}  {post_link}")
+                success_count += 1
 
             except Exception as e:
-                self.after(0, lambda: self._on_error(f"グラフ再生成失敗: {e}"))
+                self._log_safe(f"  ✗ エラー: {e}")
 
-        threading.Thread(target=task, daemon=True).start()
-
-    def _confirm_generated_image(self, image_path: Path):
-        """生成画像のプレビュー確認ダイアログ"""
-        self._log(f"画像生成完了: {image_path.name}")
-
-        preview = tk.Toplevel(self)
-        preview.title("生成画像の確認")
-        preview.geometry("820x560")
-        preview.grab_set()
-        preview.focus_set()
-
-        # 画像表示
-        pil_img = PILImage.open(str(image_path))
-        display_img = pil_img.copy()
-        display_img.thumbnail((790, 450))
-        photo = ImageTk.PhotoImage(display_img)
-
-        img_label = ttk.Label(preview, image=photo)
-        img_label.image = photo  # 参照保持
-        img_label.pack(pady=(10, 5))
-
-        ttk.Label(
-            preview,
-            text=f"{image_path.name}  ({TARGET_WIDTH}×{TARGET_HEIGHT}px)",
-            foreground="gray",
-        ).pack()
-
-        btn_frame = ttk.Frame(preview)
-        btn_frame.pack(pady=12)
-
-        def on_accept():
-            preview.destroy()
-            image_data = image_path.read_bytes()
-            self._do_wp_upload(image_data, image_path.name, "image/png")
-
-        def on_regenerate():
-            preview.destroy()
-            self._generate_ai_image()
-
-        def on_cancel():
-            preview.destroy()
-            self._log("→ 画像キャンセル、記事スキップ")
-            self._next_article()
-
-        tk.Button(
-            btn_frame,
-            text="  この画像を使用  ",
-            command=on_accept,
-            bg="#4CAF50",
-            fg="white",
-            font=("Meiryo", 10, "bold"),
-            padx=12,
-            pady=4,
-        ).pack(side="left", padx=8)
-
-        ttk.Button(btn_frame, text="再生成", command=on_regenerate).pack(
-            side="left", padx=8
-        )
-        ttk.Button(btn_frame, text="キャンセル", command=on_cancel).pack(
-            side="left", padx=8
-        )
+        # 完了
+        self.after(0, lambda: self.progress_var.set(100))
+        self.after(0, lambda: self.status_var.set(
+            f"記事アップロード完了: {success_count}件成功"
+            f" / {skip_count}件スキップ"))
+        self._log_safe("=" * 40)
+        self._log_safe(
+            f"記事アップロード完了: 成功={success_count}, スキップ={skip_count}")
 
     # ---------------------------------------------------------------
-    # WordPressアップロード実行
+    # ② WeeklyReport をアップロード
     # ---------------------------------------------------------------
-    def _do_wp_upload(self, image_data: bytes, image_filename: str, mime_type: str):
-        """メディアアップロード → 記事投稿"""
-        self._log("WordPressにアップロード中...")
-
-        def task():
-            try:
-                # メディアアップロード
-                media_id = self.wp_client.upload_media(
-                    image_data, image_filename, mime_type
-                )
-                self._log_safe(f"  メディアアップロード完了 (ID: {media_id})")
-
-                # 投稿コンテンツ作成（緑帯ヘッダー付き）
-                content = format_wp_content(
-                    self.current_article["summary"],
-                    self.current_article["detail"],
-                    self.current_article.get("source_url", ""),
-                )
-
-                # カテゴリーID取得
-                category_ids = []
-                parent_cat_id: int | None = None
-
-                # 1) フォルダ名から判定した技術カテゴリー（例: 全固体電池、半導体後工程）
-                #    ← トップレベルで検索（parent_id 未指定）
-                if self.detected_category:
-                    parent_cat_id = self.wp_client.get_or_create_category(
-                        self.detected_category
-                    )
-                    if parent_cat_id:
-                        category_ids.append(parent_cat_id)
-                        self._log_safe(
-                            f"  親カテゴリー: {self.detected_category}"
-                            f" (ID: {parent_cat_id})"
-                        )
-
-                # 2) 記事内容から判定した記事種別カテゴリー
-                #    （企業動向 / 市場動向 / 新技術・技術紹介）
-                #    ← 必ず親カテゴリーの「子」として検索・作成する
-                #       例: 半導体後工程 > 企業動向 （トップレベルの企業動向ではない）
-                content_cat = detect_content_category(self.current_article)
-                if content_cat and parent_cat_id:
-                    content_cat_id = self.wp_client.get_or_create_category(
-                        content_cat, parent_id=parent_cat_id
-                    )
-                    if content_cat_id:
-                        category_ids.append(content_cat_id)
-                        self._log_safe(
-                            f"  記事種別カテゴリー: {self.detected_category} > {content_cat}"
-                            f" (ID: {content_cat_id})"
-                        )
-                elif content_cat and not parent_cat_id:
-                    # 親カテゴリーが未判定の場合はトップレベルにフォールバック
-                    content_cat_id = self.wp_client.get_or_create_category(content_cat)
-                    if content_cat_id:
-                        category_ids.append(content_cat_id)
-                        self._log_safe(
-                            f"  記事種別カテゴリー（トップ）: {content_cat}"
-                            f" (ID: {content_cat_id})"
-                        )
-                else:
-                    self._log_safe("  記事種別カテゴリー: 判定不能（スキップ）")
-
-                category_ids = category_ids if category_ids else None
-
-                # 記事投稿（下書き）
-                result = self.wp_client.create_post(
-                    title=self.current_article["title"],
-                    content=content,
-                    featured_media_id=media_id,
-                    category_ids=category_ids,
-                    status="draft",
-                )
-
-                post_id = result.get("id", "?")
-                post_link = result.get("link", "")
-                self.after(0, lambda: self._on_upload_success(post_id, post_link))
-            except Exception as e:
-                self.after(0, lambda: self._on_error(str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def _on_upload_success(self, post_id, post_link):
-        self._log(f"✓ 投稿完了（下書き） ID: {post_id}")
-        if post_link:
-            self._log(f"  URL: {post_link}")
-        self._next_article()
-
-    # ---------------------------------------------------------------
-    # PDF・ポッドキャスト → WPアップロード
-    # ---------------------------------------------------------------
-    def _handle_pdf_upload(self):
-        """全記事処理後、フォルダ内のPDFとポッドキャストMP3を処理する"""
+    def _upload_weekly_report(self):
         if not self.selected_folder:
-            self._finish_all()
+            messagebox.showwarning("エラー", "フォルダを選択してください")
+            return
+        if not self.detected_category:
+            messagebox.showwarning(
+                "カテゴリー未判定",
+                "フォルダ名からカテゴリーを判定できませんでした。\n"
+                "フォルダ名にカテゴリーキーワード（例: 全固体電池）を含めてください。")
+            return
+        if not self._build_wp_client():
             return
 
-        # 「ウィークリーレポート」を含むPDFを検索
+        # PDF・MP3を収集
         pdf_files = sorted(
-            f
-            for f in self.selected_folder.glob("*.pdf")
+            f for f in self.selected_folder.glob("*.pdf")
             if "ウィークリーレポート" in f.name
         )
-
-        # ポッドキャストMP3を検索
         mp3_files = sorted(
-            f
-            for f in self.selected_folder.glob("*.mp3")
-            if "ポッドキャスト" in f.name
+            f for f in self.selected_folder.glob("*.mp3")
+            if "ポッドキャスト" in f.name and not f.stem.endswith("_original")
         )
 
-        upload_files = pdf_files + mp3_files
-
-        if not upload_files:
-            self._log("PDF・ポッドキャストファイルが見つかりませんでした")
-            self._finish_all()
+        if not pdf_files and not mp3_files:
+            messagebox.showwarning(
+                "ファイルなし",
+                "WeeklyReport PDF または ポッドキャスト MP3 が見つかりません\n\n"
+                "確認事項:\n"
+                "  ・PDFファイル名に「ウィークリーレポート」を含むこと\n"
+                "  ・MP3ファイル名に「ポッドキャスト」を含むこと\n"
+                "  ・_original.mp3 は除外されます")
             return
 
-        if not self.detected_category:
-            self._log("カテゴリー未判定のため、ファイルアップロードをスキップします")
-            self._finish_all()
-            return
-
-        # WPクライアント確認
-        if not self.wp_client and not self._build_wp_client():
-            self._finish_all()
-            return
-
-        # 検出ファイルをログ出力
-        for f in upload_files:
-            file_type = "PDF" if f.suffix.lower() == ".pdf" else "ポッドキャスト"
-            self._log(f"{file_type}ファイル検出: {f.name}")
-
-        # ポッドキャストのレビュー状態チェック
-        if self.selected_folder and mp3_files:
-            review_state_path = self.selected_folder / "_review_work" / "_review_state.json"
+        # ポッドキャストレビュー状態チェック
+        if mp3_files:
+            review_state_path = (
+                self.selected_folder / "_review_work" / "_review_state.json")
             if review_state_path.exists():
                 try:
                     import json as _json
-                    rs = _json.loads(review_state_path.read_text(encoding="utf-8"))
+                    rs = _json.loads(
+                        review_state_path.read_text(encoding="utf-8"))
                     if rs.get("status") not in ("reviewed",):
-                        warn_proceed = messagebox.askyesno(
+                        if not messagebox.askyesno(
                             "ポッドキャストレビュー未完了",
-                            "ポッドキャストのレビューが完了していません。\n"
+                            f"ポッドキャストのレビューが完了していません\n"
                             f"（状態: {rs.get('status', 'unreviewed')}）\n\n"
                             "レビュー未完了のまま続行しますか？",
                             icon="warning",
-                        )
-                        if not warn_proceed:
+                        ):
                             self._log("→ ポッドキャストレビュー未完了のためキャンセル")
-                            self._finish_all()
                             return
                 except Exception:
                     pass
 
         # 確認ダイアログ
-        file_names = "\n".join(f"  ・{f.name}" for f in upload_files)
-        proceed = messagebox.askyesno(
-            "ファイルアップロード確認",
-            f"以下のファイルをウィークリーレポート投稿に追加しますか？\n\n"
-            f"{file_names}\n\n"
-            f"対象投稿: 「{self.detected_category}ウィークリーレポート」",
-        )
-
-        if not proceed:
-            self._log("→ ファイルアップロードをスキップ")
-            self._finish_all()
+        all_files = pdf_files + mp3_files
+        file_list = "\n".join(f"  ・{f.name}" for f in all_files)
+        if not messagebox.askyesno(
+            "WeeklyReportアップロード確認",
+            f"以下のファイルをWeeklyReport投稿としてアップロードします:\n\n"
+            f"{file_list}\n\n"
+            f"続行しますか？",
+        ):
             return
 
-        # バックグラウンドで実行
-        self._log("ファイルアップロード処理を開始...")
-        self.title_label.config(text="PDF・ポッドキャストをアップロード中...")
+        self._set_uploading(True)
+        self.status_var.set("WeeklyReportをアップロード中...")
+        self.progress_var.set(0)
 
         def task():
             try:
-                self._upload_files_to_weekly_report(upload_files)
-                self.after(0, self._finish_all)
+                self._do_upload_weekly_report(all_files)
             except Exception as e:
-                self.after(0, lambda: self._on_error(f"ファイルアップロード失敗: {e}"))
+                self.after(0, lambda: self._on_error(
+                    f"WeeklyReportアップロード失敗: {e}"))
+            finally:
+                self.after(0, lambda: self._set_uploading(False))
 
         threading.Thread(target=task, daemon=True).start()
 
-    def _upload_files_to_weekly_report(self, files: list[Path]):
-        """PDF/MP3をまとめてアップロードし、ウィークリーレポート投稿を構成する。
+    def _do_upload_weekly_report(self, files: list[Path]):
+        """WeeklyReport 新規投稿を作成する（バックグラウンド実行）"""
+        import json as _json
 
-        構成:
-        - 最新のPDF/MP3 → 直接表示（ファイル名が見える状態）
-        - 過去のPDF/MP3 → 「過去のレポート」アコーディオン内に折りたたみ
-        """
+        # --- 1. 投稿タイトル用日付を決定 ---
+        # ファイル名中の YYYYMMDD から取得、なければ今日の日付
+        date_str = None
+        for f in files:
+            m = re.search(r"(\d{4})(\d{2})(\d{2})", f.name)
+            if m:
+                date_str = (
+                    f"{m.group(1)}年{int(m.group(2))}月{int(m.group(3))}日")
+                break
+        if not date_str:
+            now = datetime.now()
+            date_str = f"{now.year}年{now.month}月{now.day}日"
 
-        # --- 1. 全ファイルをメディアライブラリにアップロード ---
-        new_blocks = []  # 今回アップロードしたブロック
-        for file_path in files:
-            ext = file_path.suffix.lower()
+        # 投稿タイトル: "{技術カテゴリー}{YYYY}年{M}月{D}日号"
+        # 例: 全固体電池2026年4月16日号
+        post_title = f"{self.detected_category}{date_str}号"
+        self._log_safe(f"投稿タイトル: {post_title}")
+
+        # --- 2. 各ファイルをWPメディアにアップロードしてブロックを生成 ---
+        new_blocks: list[str] = []
+        total_files = len(files)
+
+        for fi, file_path in enumerate(files, 1):
+            ext    = file_path.suffix.lower()
             is_mp3 = ext == ".mp3"
-            file_type_label = "ポッドキャスト" if is_mp3 else "PDF"
-            mime_type = "audio/mpeg" if is_mp3 else "application/pdf"
+            label  = "ポッドキャスト" if is_mp3 else "WeeklyReport PDF"
+            mime   = "audio/mpeg" if is_mp3 else "application/pdf"
 
-            self._log_safe(f"  {file_type_label}アップロード中: {file_path.name}")
-            self._log_safe(f"  ファイルサイズ: {file_path.stat().st_size / 1024:.0f} KB")
-            file_data = file_path.read_bytes()
+            pct = (fi - 1) / total_files * 75  # 75%まで進める
+            self.after(0, lambda p=pct, fn=file_path.name: (
+                self.progress_var.set(p),
+                self.status_var.set(f"{label}をアップロード中: {fn}"),
+            ))
+            size_kb = file_path.stat().st_size / 1024
+            self._log_safe(
+                f"  {label}をアップロード中: {file_path.name}"
+                f" ({size_kb:.0f} KB)")
 
             try:
-                media_id = self.wp_client.upload_media(file_data, file_path.name, mime_type)
+                media_id = self.wp_client.upload_media(
+                    file_path.read_bytes(), file_path.name, mime)
             except Exception as e:
-                self._log_safe(f"  ✗ メディアアップロード失敗: {e}")
+                self._log_safe(f"  ✗ {label}アップロード失敗: {e}")
                 continue
-            self._log_safe(f"  メディアアップロード完了 (ID: {media_id})")
 
-            resp = requests.get(
-                f"{self.wp_client.api_url}/media/{media_id}",
-                auth=self.wp_client.auth, timeout=15,
-            )
-            if resp.status_code != 200:
-                self._log_safe(f"  ✗ メディア情報取得失敗: {resp.status_code}")
-                continue
-            file_url = resp.json().get("source_url", "")
+            self._log_safe(f"  メディア ID: {media_id}")
+
+            # メディアURLを取得
+            try:
+                resp = requests.get(
+                    f"{self.wp_client.api_url}/media/{media_id}",
+                    auth=self.wp_client.auth, timeout=15,
+                )
+                file_url = (
+                    resp.json().get("source_url", "")
+                    if resp.status_code == 200 else "")
+            except Exception:
+                file_url = ""
+
             if not file_url:
-                self._log_safe(f"  ✗ {file_type_label}のURLを取得できませんでした")
+                self._log_safe(f"  ✗ {label}のURLを取得できませんでした")
                 continue
-            self._log_safe(f"  {file_type_label} URL: {file_url}")
 
             display_label = self._make_file_display_label(file_path.name)
 
@@ -2182,7 +1579,8 @@ class WPUploaderApp(tk.Tk):
                     f'<!-- /wp:paragraph -->\n'
                     f'<!-- wp:audio {{"id":{media_id}}} -->\n'
                     f'<figure class="wp-block-audio">'
-                    f'<audio controls src="{file_url}"></audio></figure>\n'
+                    f'<audio controls src="{file_url}"></audio>'
+                    f'</figure>\n'
                     f'<!-- /wp:audio -->\n'
                     f'<!-- wp:file {{"id":{media_id},"href":"{file_url}"}} -->\n'
                     f'<div class="wp-block-file">'
@@ -2190,7 +1588,8 @@ class WPUploaderApp(tk.Tk):
                     f'href="{file_url}">{file_path.name}</a>'
                     f'<a href="{file_url}" '
                     f'class="wp-block-file__button wp-element-button" '
-                    f'download aria-describedby="wp-block-file--media-{media_id}">'
+                    f'download aria-describedby='
+                    f'"wp-block-file--media-{media_id}">'
                     f'ダウンロード</a></div>\n'
                     f'<!-- /wp:file -->\n'
                 )
@@ -2205,75 +1604,74 @@ class WPUploaderApp(tk.Tk):
                     f'href="{file_url}">{display_label}</a>'
                     f'<a href="{file_url}" '
                     f'class="wp-block-file__button wp-element-button" '
-                    f'download aria-describedby="wp-block-file--media-{media_id}">'
+                    f'download aria-describedby='
+                    f'"wp-block-file--media-{media_id}">'
                     f'ダウンロード</a></div>\n'
                     f'<!-- /wp:file -->\n'
                 )
             new_blocks.append(block)
 
         if not new_blocks:
-            self._log_safe("  アップロードできるファイルがありませんでした")
+            self._log_safe("  ✗ アップロードできるファイルがありませんでした")
             return
 
-        # --- 2. 投稿タイトルの日付を決定（PDFファイル名から抽出） ---
-        date_str = None
-        for f in files:
-            m = re.search(r"(\d{4})(\d{2})(\d{2})", f.name)
-            if m:
-                date_str = f"{m.group(1)}年{int(m.group(2))}月{int(m.group(3))}日"
-                break
-        if not date_str:
-            now = datetime.now()
-            date_str = f"{now.year}年{now.month}月{now.day}日"
+        # --- 3. カテゴリーIDを取得 ---
+        self.after(0, lambda: (
+            self.status_var.set("カテゴリーを設定中..."),
+            self.progress_var.set(80),
+        ))
+        category_ids:  list[int] = []
+        parent_cat_id: int | None = None
 
-        # 投稿タイトル: "[カテゴリー]ウィークリーレポート [日付]号"
-        post_title = f"{self.detected_category}ウィークリーレポート {date_str}号"
-        self._log_safe(f"  新規投稿タイトル: {post_title}")
+        try:
+            parent_cat_id = self.wp_client.get_or_create_category(
+                self.detected_category)
+            if parent_cat_id:
+                category_ids.append(parent_cat_id)
+                self._log_safe(
+                    f"  技術カテゴリー: {self.detected_category}"
+                    f" (ID: {parent_cat_id})")
+        except Exception as e:
+            self._log_safe(f"  ⚠ 技術カテゴリー取得失敗: {e}")
 
-        # --- 3. アイキャッチ画像をメディアライブラリから検索 ---
-        # 例: "全固体電池ウィークリーレポート" にマッチする画像を探す
+        # 子カテゴリー「最新のトピック（1週間）」
+        weekly_cat_name = "最新のトピック（1週間）"
+        try:
+            weekly_cat_id = self.wp_client.get_or_create_category(
+                weekly_cat_name,
+                parent_id=parent_cat_id if parent_cat_id else None,
+            )
+            if weekly_cat_id:
+                category_ids.append(weekly_cat_id)
+                self._log_safe(
+                    f"  サブカテゴリー: {weekly_cat_name}"
+                    f" (ID: {weekly_cat_id})")
+        except Exception as e:
+            self._log_safe(f"  ⚠ サブカテゴリー取得失敗: {e}")
+
+        # --- 4. アイキャッチ画像をメディアライブラリから検索 ---
         eyecatch_id: int | None = None
-        for search_kw in [
+        for kw in [
             f"{self.detected_category}ウィークリーレポート",
             f"{self.detected_category}WeeklyReport",
             "ウィークリーレポート",
-            "WeeklyReport",
         ]:
-            self._log_safe(f"  アイキャッチ画像検索: 「{search_kw}」")
-            eyecatch_id = self.wp_client.search_media_by_keyword(search_kw)
+            try:
+                eyecatch_id = self.wp_client.search_media_by_keyword(kw)
+            except Exception:
+                pass
             if eyecatch_id:
                 self._log_safe(f"  アイキャッチ画像 ID: {eyecatch_id}")
                 break
         if not eyecatch_id:
-            self._log_safe("  ⚠ アイキャッチ画像が見つかりませんでした（なしで続行）")
-
-        # --- 4. カテゴリーIDを取得 ---
-        category_ids: list[int] = []
-        parent_cat_id: int | None = None
-        if self.detected_category:
-            parent_cat_id = self.wp_client.get_or_create_category(self.detected_category)
-            if parent_cat_id:
-                category_ids.append(parent_cat_id)
-                self._log_safe(
-                    f"  親カテゴリー: {self.detected_category} (ID: {parent_cat_id})"
-                )
-
-        # 子カテゴリー「最新のトピック（1週間）」を親カテゴリーの子として取得
-        weekly_cat_name = "最新のトピック（1週間）"
-        weekly_cat_id: int | None = None
-        if parent_cat_id:
-            weekly_cat_id = self.wp_client.get_or_create_category(
-                weekly_cat_name, parent_id=parent_cat_id
-            )
-        else:
-            weekly_cat_id = self.wp_client.get_or_create_category(weekly_cat_name)
-        if weekly_cat_id:
-            category_ids.append(weekly_cat_id)
             self._log_safe(
-                f"  子カテゴリー: {weekly_cat_name} (ID: {weekly_cat_id})"
-            )
+                "  ⚠ アイキャッチ画像が見つかりませんでした（なしで続行）")
 
-        # --- 5. 新規投稿を作成 ---
+        # --- 5. 新規投稿を作成（公開・sticky・先頭移動）---
+        self.after(0, lambda: (
+            self.status_var.set("投稿を作成中..."),
+            self.progress_var.set(90),
+        ))
         try:
             from datetime import timezone as _tz
             now_utc = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -2289,151 +1687,124 @@ class WPUploaderApp(tk.Tk):
             )
             new_id = new_post.get("id", "?")
             self._log_safe(
-                f"  ✓ 新規投稿を作成しました (ID: {new_id})"
-                f" status={new_post.get('status','?')}"
-                f" sticky={new_post.get('sticky','?')}"
-                f" date={new_post.get('date','?')}"
-                f" date_gmt={new_post.get('date_gmt','?')}"
-            )
-            # 作成後にトップ移動を別コールで確実に適用
+                f"  ✓ 投稿作成 (ID: {new_id})"
+                f" status={new_post.get('status', '?')}")
+
+            # 作成後に bump_to_top を別コールで確実に適用
             if isinstance(new_id, int):
                 bump = self.wp_client.bump_to_top(new_id)
                 self._log_safe(
-                    f"  ✓ トップ移動適用 sticky={bump.get('sticky','?')}"
-                    f" date={bump.get('date','?')}"
-                )
+                    f"  ✓ 先頭移動 sticky={bump.get('sticky', '?')}"
+                    f" date={bump.get('date', '?')}")
+
         except Exception as e:
-            self._log_safe(f"  ✗ 新規投稿の作成に失敗: {e}")
+            self._log_safe(f"  ✗ 投稿作成失敗: {e}")
+            raise
 
-    def _restructure_content(
-        self, existing_content: str, new_blocks: list[str]
-    ) -> str:
-        """投稿コンテンツを再構成する。
+        self.after(0, lambda: (
+            self.progress_var.set(100),
+            self.status_var.set(
+                f"WeeklyReport投稿完了: 「{post_title}」"),
+        ))
+        self._log_safe("=" * 40)
+        self._log_safe(f"WeeklyReport投稿完了: 「{post_title}」")
 
-        - 既存の「今週のレポート」セクション（アコーディオン外のブロック）を
-          「過去のレポート」アコーディオン内に移動
-        - 新しいブロックを先頭に配置
-        - 既存の「過去のレポート」アコーディオンはそのまま維持（中に追記）
-        """
-        ARCHIVE_SUMMARY = "過去のレポート・ポッドキャスト"
+    # ---------------------------------------------------------------
+    # ③ 全てまとめてアップロード（記事 → WeeklyReport の順）
+    # ---------------------------------------------------------------
+    def _upload_all(self):
+        if not self.selected_folder:
+            messagebox.showwarning("エラー", "フォルダを選択してください")
+            return
+        if not self._build_wp_client():
+            return
 
-        # 既存コンテンツから各パートを分離
-        # 1. 「過去のレポート」アコーディオンの中身を抽出
-        archive_pattern = (
-            r'<!-- wp:details -->\s*'
-            r'<details class="wp-block-details">\s*'
-            r'<summary>' + re.escape(ARCHIVE_SUMMARY) + r'</summary>\s*'
-            r'(.*?)'
-            r'</details>\s*'
-            r'<!-- /wp:details -->'
+        # 実行前の確認
+        html_files = sorted(
+            f for f in self.selected_folder.glob("*.html")
+            if not f.name.startswith("不採用_")
+            and not f.name.endswith("_概要.html")
         )
-        archive_match = re.search(archive_pattern, existing_content, re.DOTALL)
+        articles_count = sum(
+            1 for f in html_files if self._find_eyecatch_file(f))
+        pdf_files = [f for f in self.selected_folder.glob("*.pdf")
+                     if "ウィークリーレポート" in f.name]
+        mp3_files = [f for f in self.selected_folder.glob("*.mp3")
+                     if "ポッドキャスト" in f.name
+                     and not f.stem.endswith("_original")]
 
-        if archive_match:
-            # 既存のアーカイブアコーディオンの中身
-            archive_inner = archive_match.group(1).strip()
-            # アーカイブ以外のコンテンツ（＝前回の「最新」部分）
-            non_archive = (
-                existing_content[:archive_match.start()].strip()
-                + "\n"
-                + existing_content[archive_match.end():].strip()
-            ).strip()
-        else:
-            archive_inner = ""
-            non_archive = existing_content.strip()
-
-        # 2. 前回の「最新」部分をアコーディオンアイテムに変換
-        #    （空のパラグラフや空のSwell accordion は除外）
-        old_latest_items = self._extract_file_blocks(non_archive)
-
-        # 3. アーカイブに追記する中身を構築
-        #    前回の最新 → 個別アコーディオンに変換してアーカイブに追加
-        new_archive_items = ""
-        for item_label, item_content in old_latest_items:
-            new_archive_items += (
-                f'<!-- wp:details -->\n'
-                f'<details class="wp-block-details">'
-                f'<summary>{item_label}</summary>\n'
-                f'{item_content}'
-                f'</details>\n'
-                f'<!-- /wp:details -->\n'
-            )
-
-        # アーカイブ全体: 新しい→古い の順
-        full_archive_inner = new_archive_items + archive_inner
-
-        # 4. 最終コンテンツを組み立て
-        #    最新ブロック + 過去アコーディオン
-        parts = []
-
-        # 最新のPDF/MP3ブロック（直接表示）
-        for block in new_blocks:
-            parts.append(block)
-
-        # 過去のレポートアコーディオン（中身がある場合のみ）
-        if full_archive_inner.strip():
-            parts.append(
-                f'<!-- wp:details -->\n'
-                f'<details class="wp-block-details">'
-                f'<summary>{ARCHIVE_SUMMARY}</summary>\n'
-                f'{full_archive_inner}'
-                f'</details>\n'
-                f'<!-- /wp:details -->\n'
-            )
-
-        return "\n".join(parts)
-
-    def _extract_file_blocks(
-        self, content: str
-    ) -> list[tuple[str, str]]:
-        """コンテンツからファイルブロック（PDF/MP3）を抽出する。
-
-        Returns:
-            [(ラベル, ブロックHTML), ...] のリスト
-        """
-        items = []
-        if not content.strip():
-            return items
-
-        # wp:details ブロックを抽出（既存のアコーディオン項目）
-        details_pattern = (
-            r'<!-- wp:details -->\s*'
-            r'<details class="wp-block-details">\s*'
-            r'<summary>(.*?)</summary>\s*'
-            r'(.*?)'
-            r'</details>\s*'
-            r'<!-- /wp:details -->'
+        msg = (
+            "以下を順番にアップロードします:\n\n"
+            f"  ① 採用記事（アイキャッチあり）: {articles_count}件\n"
+            f"  ② WeeklyReport PDF: {len(pdf_files)}件\n"
+            f"  ③ ポッドキャスト MP3: {len(mp3_files)}件\n\n"
+            "続行しますか？"
         )
-        for m in re.finditer(details_pattern, content, re.DOTALL):
-            label = m.group(1).strip()
-            inner = m.group(2).strip()
-            if inner and label:  # 空でなければ追加
-                items.append((label, inner))
+        if not messagebox.askyesno("全件アップロード確認", msg):
+            return
 
-        # wp:file ブロックをアコーディオン外から直接抽出
-        # (前回の最新表示分: paragraphヘッダー + file/audioブロック)
-        remaining = re.sub(details_pattern, '', content, flags=re.DOTALL)
+        self._set_uploading(True)
+        self.status_var.set("全件アップロードを開始します...")
+        self.progress_var.set(0)
 
-        # 📄/🎙 ヘッダー付きのファイルブロック群を抽出
-        header_pattern = (
-            r'<!-- wp:paragraph -->\s*'
-            r'<p><strong>[📄🎙]\s*(.*?)</strong></p>\s*'
-            r'<!-- /wp:paragraph -->'
-        )
-        headers = list(re.finditer(header_pattern, remaining, re.DOTALL))
+        def task():
+            try:
+                # ① 記事アップロード
+                target_articles = [
+                    (f, self._find_eyecatch_file(f)) for f in html_files]
+                if target_articles:
+                    self._log_safe("── 記事を一括アップロード ──")
+                    self._do_upload_articles(target_articles)
 
-        for hi, hm in enumerate(headers):
-            label = hm.group(1).strip()
-            start = hm.end()
-            # 次のヘッダーまで、またはコンテンツ末尾
-            end = headers[hi + 1].start() if hi + 1 < len(headers) else len(remaining)
-            block_content = remaining[start:end].strip()
+                # ② WeeklyReport アップロード
+                all_report_files = pdf_files + mp3_files
+                if all_report_files and self.detected_category:
+                    self._log_safe("── WeeklyReport をアップロード ──")
+                    self._do_upload_weekly_report(all_report_files)
+                elif all_report_files and not self.detected_category:
+                    self._log_safe(
+                        "  ⚠ カテゴリー未判定のためWeeklyReportアップロードをスキップ")
 
-            # 空でないfile/audioブロックが含まれていれば追加
-            if '<!-- wp:file' in block_content or '<!-- wp:audio' in block_content:
-                items.append((label, block_content))
+                self.after(0, lambda: (
+                    self.progress_var.set(100),
+                    self.status_var.set("全件アップロード完了"),
+                ))
+                self._log_safe("=" * 40)
+                self._log_safe("全件アップロード完了")
+                self.after(0, lambda: messagebox.showinfo(
+                    "完了", "全てのアップロードが完了しました"))
 
-        return items
+            except Exception as e:
+                self.after(0, lambda: self._on_error(
+                    f"全件アップロード失敗: {e}"))
+            finally:
+                self.after(0, lambda: self._set_uploading(False))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    # ---------------------------------------------------------------
+    # ヘルパー
+    # ---------------------------------------------------------------
+    def _set_uploading(self, uploading: bool):
+        """アップロード中はボタンをすべて無効化し、完了後に再有効化する"""
+        self._uploading = uploading
+        state = "disabled" if uploading else "normal"
+        self.btn_articles.config(state=state)
+        self.btn_weekly.config(state=state)
+        self.btn_all.config(state=state)
+
+    def _on_error(self, message: str):
+        self._log(f"✗ エラー: {message}")
+        messagebox.showerror("エラー", message)
+
+    def _log(self, message: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_text.insert("end", f"[{ts}] {message}\n")
+        self.log_text.see("end")
+
+    def _log_safe(self, message: str):
+        """別スレッドからのログ追加（after で UI スレッドに転送）"""
+        self.after(0, lambda m=message: self._log(m))
 
     def _make_file_display_label(self, filename: str) -> str:
         """ファイル名から表示ラベルを生成する
@@ -2441,84 +1812,22 @@ class WPUploaderApp(tk.Tk):
         例: 全固体電池調査ウィークリーレポート20260322.pdf
           → ウィークリーレポート 2026年3月22日（PDF）をダウンロード
         例: 全固体電池調査20260322ポッドキャスト.mp3
-          → ポッドキャスト 2026年3月22日（MP3）を再生
+          → ポッドキャスト 2026年3月22日（MP3）を再生・ダウンロード
         """
-        ext = Path(filename).suffix.lower()
+        ext    = Path(filename).suffix.lower()
         is_mp3 = ext == ".mp3"
-
-        # ファイル名から日付部分(YYYYMMDD)を抽出
-        match = re.search(r"(\d{4})(\d{2})(\d{2})", filename)
-        if match:
-            year = match.group(1)
-            month = str(int(match.group(2)))  # 先頭ゼロ除去
-            day = str(int(match.group(3)))
-            date_str = f"{year}年{month}月{day}日"
+        m = re.search(r"(\d{4})(\d{2})(\d{2})", filename)
+        if m:
+            date_str = (
+                f"{m.group(1)}年{int(m.group(2))}月{int(m.group(3))}日")
         else:
             now = datetime.now()
             date_str = f"{now.year}年{now.month}月{now.day}日"
-
-        if is_mp3:
-            return f"ポッドキャスト {date_str}（MP3）を再生"
-        else:
-            return f"ウィークリーレポート {date_str}（PDF）をダウンロード"
-
-    def _finish_all(self):
-        """全処理完了"""
-        self._log("=" * 40)
-        self._log("すべての処理が完了しました")
-        self.title_label.config(text="すべての処理が完了しました")
-        messagebox.showinfo("完了", "すべての処理が完了しました")
-
-    # ---------------------------------------------------------------
-    # ヘルパー
-    # ---------------------------------------------------------------
-    def _next_article(self):
-        self._close_chrome()
-        self.current_index += 1
-        self._show_current_article()
-
-    def _skip_all_articles(self):
-        """すべての記事をスキップしてPDF/ポッドキャストアップロードへ直行"""
-        self._close_chrome()
-        remaining = len(self.html_files) - self.current_index
-        if remaining <= 0:
-            return
-        proceed = messagebox.askyesno(
-            "すべてスキップ",
-            f"残り{remaining}件の記事をすべてスキップして、\n"
-            f"PDF・ポッドキャストのアップロードに進みますか？",
+        return (
+            f"ポッドキャスト {date_str}（MP3）を再生・ダウンロード"
+            if is_mp3
+            else f"ウィークリーレポート {date_str}（PDF）をダウンロード"
         )
-        if not proceed:
-            return
-        self._log(f"→ 残り{remaining}件の記事をすべてスキップ")
-        self.current_index = len(self.html_files)
-        self.progress_label.config(text="完了")
-        self.title_label.config(text="記事をスキップしました")
-        self.meta_label.config(text="")
-        self.complete_btn.config(state="disabled")
-        self.skip_btn.config(state="disabled")
-        self.skip_all_btn.config(state="disabled")
-        # PDF/ポッドキャストアップロード処理へ
-        self._handle_pdf_upload()
-
-    def _enable_buttons(self):
-        self.complete_btn.config(state="normal")
-        self.skip_btn.config(state="normal")
-        self.skip_all_btn.config(state="normal")
-
-    def _on_error(self, message: str):
-        self._log(f"✗ エラー: {message}")
-        messagebox.showerror("エラー", message)
-        self._enable_buttons()
-
-    def _log(self, message: str):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert("end", f"[{timestamp}] {message}\n")
-        self.log_text.see("end")
-
-    def _log_safe(self, message: str):
-        """別スレッドからのログ追加"""
-        self.after(0, lambda: self._log(message))
 
 
 # =====================================================================

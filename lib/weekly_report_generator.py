@@ -38,7 +38,7 @@ from pypdf import PdfWriter, PdfReader
 BASE_DIR = Path(__file__).parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"  # fallback handled in generate_front_report_json
 
 # ---------------------------------------------------------------------------
 # フォント登録 (Windows: メイリオ優先)
@@ -146,22 +146,69 @@ def generate_front_report_json(
     if progress_callback:
         progress_callback("Gemini APIで記事分析中...")
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=user_prompt,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.3,
-        ),
-    )
+    # gemini-1.5-flash は v1beta API で廃止済み（404 NOT_FOUND）のため除外。
+    # 429/503 は一時的エラー → 同モデルでリトライ。404 は恒久エラー → 次モデルへ。
+    _FALLBACK_MODELS = [
+        GEMINI_MODEL,          # gemini-2.5-flash
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+    ]
 
-    text = response.text.strip()
-    # JSON部分を抽出 (```json ... ``` で囲まれている場合のフォールバック)
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+    import time as _time
 
-    return json.loads(text)
+    def _is_transient(exc: Exception) -> bool:
+        """429 / 503 / RESOURCE_EXHAUSTED など一時的エラーかどうか判定"""
+        s = str(exc)
+        return any(k in s for k in ("429", "503", "RESOURCE_EXHAUSTED",
+                                    "overloaded", "rate", "quota", "too many"))
+
+    def _is_not_found(exc: Exception) -> bool:
+        """404 / NOT_FOUND = モデル廃止・未対応 → リトライ無意味"""
+        s = str(exc)
+        return any(k in s for k in ("404", "NOT_FOUND", "not found",
+                                    "not supported"))
+
+    last_err = None
+    for _model in _FALLBACK_MODELS:
+        # 一時的エラーに対して最大 3 回リトライ（指数バックオフ）
+        for _attempt in range(3):
+            try:
+                if progress_callback and _attempt > 0:
+                    progress_callback(
+                        f"Gemini API リトライ中... ({_model} 試行 {_attempt + 1}/3)")
+                response = client.models.generate_content(
+                    model=_model,
+                    contents=user_prompt,
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.3,
+                    ),
+                )
+                text = response.text.strip()
+                # JSON部分を抽出 (```json ... ``` で囲まれている場合のフォールバック)
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*", "", text)
+                    text = re.sub(r"\s*```$", "", text)
+                return json.loads(text)
+            except Exception as e:
+                last_err = e
+                if _is_not_found(e):
+                    # モデル廃止など恒久エラー → 次モデルへ
+                    if progress_callback:
+                        progress_callback(
+                            f"  {_model} は利用不可（404）。次のモデルを試します...")
+                    break
+                if _is_transient(e) and _attempt < 2:
+                    wait = 10 * (2 ** _attempt)  # 10s → 20s
+                    if progress_callback:
+                        progress_callback(
+                            f"  一時的エラー ({_model})。{wait}秒後にリトライします...")
+                    _time.sleep(wait)
+                    continue
+                # その他エラーまたはリトライ上限 → 次モデルへ
+                break
+
+    raise RuntimeError(f"Gemini API呼び出し失敗（全モデル試行済み）: {last_err}")
 
 
 # ===================================================================
@@ -392,16 +439,28 @@ class _OTMatrix(Flowable):
         c.setLineWidth(0.5)
         c.rect(mx, my, mw, mh, fill=0, stroke=1)
 
-        # 象限ラベル（右上隅に小さく）
+        # 象限ラベル（各象限の上部に半透明の帯で描画し、円と重ならないよう視認性を確保）
         c.setFont("JP", 6.5)
+        label_band_h = 5.2 * mm  # 象限ラベル用のヘッダー帯の高さ
+        # 各象限の上部に白い半透明帯
+        c.setFillColor(HexColor("#FFFFFF"))
+        c.setFillAlpha(0.75)
+        c.rect(mx,        my + mh - label_band_h, hw, label_band_h, fill=1, stroke=0)
+        c.rect(mx + hw,   my + mh - label_band_h, hw, label_band_h, fill=1, stroke=0)
+        c.rect(mx,        my + hh - label_band_h, hw, label_band_h, fill=1, stroke=0)
+        c.rect(mx + hw,   my + hh - label_band_h, hw, label_band_h, fill=1, stroke=0)
+        c.setFillAlpha(1.0)
+        # ラベル本体（帯の中に描画）
+        label_y_top = my + mh - label_band_h + 1.4 * mm
+        label_y_mid = my + hh - label_band_h + 1.4 * mm
         c.setFillColor(HexColor("#4CAF50"))
-        c.drawString(mx + 2 * mm, my + mh - 4 * mm, "機会大・脅威小")
+        c.drawString(mx + 2 * mm, label_y_top, "機会大・脅威小")
         c.setFillColor(HexColor("#E67E22"))
-        c.drawString(mx + hw + 2 * mm, my + mh - 4 * mm, "機会大・脅威大")
+        c.drawString(mx + hw + 2 * mm, label_y_top, "機会大・脅威大")
         c.setFillColor(MG)
-        c.drawString(mx + 2 * mm, my + hh - 4.5 * mm, "影響小（参考）")
+        c.drawString(mx + 2 * mm, label_y_mid, "影響小（参考）")
         c.setFillColor(HexColor("#E53935"))
-        c.drawString(mx + hw + 2 * mm, my + hh - 4.5 * mm, "脅威大・機会小")
+        c.drawString(mx + hw + 2 * mm, label_y_mid, "脅威大・機会小")
 
         # 軸ラベル
         c.setFont("JP", 7)
@@ -413,17 +472,36 @@ class _OTMatrix(Flowable):
         c.restoreState()
         c.drawCentredString(mx + mw / 2, my - 5 * mm, "← 脅威 →")
 
-        # プロットアイテム（円 + ラベルのみ。テキスト詳細は凡例テーブルへ）
+        # ── アイテムのプロット（2パス）──
+        # Pass 1: 全円を描画
+        # Pass 2: 全ラベルを全円の上に描画
+        # → 後から描いた円が先のラベルを隠す問題を防ぐ
         COLOR_MAP = {
             "red": RED, "orange": self.acc, "teal": TEAL,
             "green": GRN, "gray": MG,
         }
-        R_DOT = 4.5 * mm   # 全アイテム同サイズの円（少し大きめ）
+        R_DOT = 4.5 * mm   # 全アイテム同サイズの円
+        LABEL_H = 5.0 * mm  # ラベルボックス高さ
+        LABEL_FONT = 7.5    # ラベルフォントサイズ
 
+        # ラベルは円の上に配置するため、上端余白を追加
+        # 下端は円半径のみ（ラベルは下に出ない）
+        y_top_pad = (label_band_h + R_DOT + LABEL_H + 2.0 * mm) / hh
+        y_bot_pad = (R_DOT + 1.5 * mm) / hh
+        x_pad     = (R_DOT + 1.5 * mm) / hw
+        yf_min_clamp = max(0.08, y_bot_pad)
+        yf_max_clamp = min(0.92, 1.0 - y_top_pad)
+        xf_min_clamp = max(0.05, x_pad)
+        xf_max_clamp = min(0.95, 1.0 - x_pad)
+
+        # ── Pass 1: 座標計算 ＋ 円描画 ──
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        placed: list[tuple] = []   # (px, py, label, color, by)
+        placed_xy: list[tuple[float, float]] = []
         for item in self.items:
-            quad = item.get("quadrant", "BL")
-            xf = max(0.05, min(0.95, item.get("x_position", 0.5)))
-            yf = max(0.08, min(0.92, item.get("y_position", 0.5)))
+            quad  = item.get("quadrant", "BL")
+            xf    = max(xf_min_clamp, min(xf_max_clamp, item.get("x_position", 0.5)))
+            yf    = max(yf_min_clamp, min(yf_max_clamp, item.get("y_position", 0.5)))
             label = item.get("label", "")
             color = COLOR_MAP.get(item.get("color", "gray"), MG)
 
@@ -432,7 +510,26 @@ class _OTMatrix(Flowable):
             px_pos = bx + xf * hw
             py_pos = by + yf * hh
 
-            # 白縁取り付きの塗りつぶし円（影効果）
+            # 衝突回避（最低 2*R_DOT+4mm 離す）
+            min_dist = 2 * R_DOT + 4 * mm
+            for _ in range(10):
+                collision = any(
+                    (px_pos - ox) ** 2 + (py_pos - oy) ** 2 < min_dist ** 2
+                    for ox, oy in placed_xy
+                )
+                if not collision:
+                    break
+                py_pos -= 3 * mm
+                if py_pos < by + yf_min_clamp * hh:
+                    py_pos = by + yf_min_clamp * hh
+                    px_pos += 4 * mm
+                if px_pos > bx + xf_max_clamp * hw:
+                    px_pos = bx + xf_max_clamp * hw
+
+            placed_xy.append((px_pos, py_pos))
+            placed.append((px_pos, py_pos, label, color, by))
+
+            # 影 → 白縁 → 塗り
             c.setFillColor(HexColor("#CCCCCC"))
             c.circle(px_pos + 0.6 * mm, py_pos - 0.6 * mm, R_DOT, fill=1, stroke=0)
             c.setFillColor(W)
@@ -440,17 +537,31 @@ class _OTMatrix(Flowable):
             c.setFillColor(color)
             c.circle(px_pos, py_pos, R_DOT, fill=1, stroke=0)
 
-            # ラベルテキスト（円の下に濃色で描画 — 白抜きより遥かに読みやすい）
-            font_size = 7.0
-            label_y = py_pos - R_DOT - 3.5 * mm
-            # 背景白帯（文字が背景色・象限色と干渉しないよう）
-            from reportlab.pdfbase.pdfmetrics import stringWidth
-            lw = stringWidth(label, "JP", font_size) + 2 * mm
+        # ── Pass 2: 全ラベルを最前面に描画 ──
+        # ラベルは円の上方に配置し、象限ヘッダー帯を超えないようクランプ
+        for (px_pos, py_pos, label, color, by) in placed:
+            # 象限ヘッダー帯の下端（ここより上にラベルを出してはいけない）
+            quad_ceiling = by + hh - label_band_h - 0.5 * mm
+
+            # ラベルのY位置（ベースライン）: 円の上に R_DOT + 1.5mm
+            label_y = py_pos + R_DOT + 1.5 * mm
+            # ボックス上端がヘッダー帯に入り込まないようクランプ
+            box_top = label_y - 0.8 * mm + LABEL_H
+            if box_top > quad_ceiling:
+                label_y = quad_ceiling - LABEL_H + 0.8 * mm
+
+            lw = stringWidth(label, "JP", LABEL_FONT) + 3 * mm
+
+            # 白背景＋アクセントカラーの枠線（コントラスト確保）
             c.setFillColor(W)
-            c.roundRect(px_pos - lw / 2, label_y - 0.5 * mm, lw, 4 * mm,
-                        1 * mm, fill=1, stroke=0)
-            # 文字（ネイビー）
-            c.setFont("JP", font_size)
+            c.setStrokeColor(color)
+            c.setLineWidth(0.8)
+            c.roundRect(px_pos - lw / 2, label_y - 0.8 * mm, lw, LABEL_H,
+                        1.2 * mm, fill=1, stroke=1)
+            c.setLineWidth(0.3)
+
+            # ネイビーで文字
+            c.setFont("JP", LABEL_FONT)
             c.setFillColor(NAVY)
             c.drawCentredString(px_pos, label_y, label)
 

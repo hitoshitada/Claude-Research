@@ -33,10 +33,8 @@ WP_ENV_PATH = BASE_DIR / "Python_Auto_Uploader.env"
 try:
     from wp_uploader import (
         generate_image_with_gemini,
-        detect_chart_in_image,
         extract_chart_data,
         render_chart_image,
-        generate_image_with_chart,
         WordPressClient,
         CATEGORY_MAP,
         detect_category,
@@ -169,6 +167,18 @@ def load_image_from_url_or_path(url_or_path: str, base_dir: Path) -> "PILImage.I
     return None
 
 
+def _fit_cover_pil(img: "PILImage.Image", w: int, h: int) -> "PILImage.Image":
+    """w×h に固定サイズでセンタークロップリサイズ（縦長・横長を問わず均一な矩形に）"""
+    img_w, img_h = img.size
+    scale = max(w / img_w, h / img_h)
+    new_w = max(w, int(img_w * scale))
+    new_h = max(h, int(img_h * scale))
+    img_resized = img.resize((new_w, new_h), PILImage.LANCZOS)
+    left = (new_w - w) // 2
+    top  = (new_h - h) // 2
+    return img_resized.crop((left, top, left + w, top + h))
+
+
 # ─── メインGUIアプリ ───
 
 class ArticleCuratorApp:
@@ -226,38 +236,19 @@ class ArticleCuratorApp:
         self.left_panel.pack(side=LEFT, fill=Y, padx=(0, 6))
         self.left_panel.pack_propagate(False)
 
-        # 画像プレビューキャンバス
-        img_lf = ttk.LabelFrame(self.left_panel, text="アイキャッチ画像プレビュー", padding=4)
-        img_lf.pack(fill=X, pady=(0, 6))
-        self.img_canvas = Canvas(img_lf, width=380, height=213, bg="#cccccc")
-        self.img_canvas.pack()
-        self.img_label_text = Label(img_lf, text="画像なし", font=("Yu Gothic UI", 9), fg="#888")
-        self.img_label_text.pack()
+        # ===== 採否ボタンエリアを先に BOTTOM に固定（常に表示） =====
+        bottom_frame = Frame(self.left_panel, bg="#f5f5f5")
+        bottom_frame.pack(side=BOTTOM, fill=X)
 
-        # 画像選択オプション
-        opt_lf = ttk.LabelFrame(self.left_panel, text="アイキャッチ画像の選択", padding=8)
-        opt_lf.pack(fill=X, pady=(0, 6))
+        # ステータス
+        self.status_label = Label(bottom_frame, text="フォルダを選択してください",
+                                   font=("Yu Gothic UI", 9), fg="#333", bg="#f5f5f5",
+                                   wraplength=380, justify=LEFT)
+        self.status_label.pack(fill=X, pady=(2, 0))
 
-        options = [
-            ("keep", "そのまま使用（記事内画像）"),
-            ("library", "WPライブラリから選択"),
-            ("ai_generate", "AI新規生成（Imagen）"),
-            ("chart_generate", "グラフ読取＆新規生成"),
-        ]
-        for val, label in options:
-            rb = Radiobutton(opt_lf, text=label, variable=self.image_option, value=val,
-                             font=("Yu Gothic UI", 10), bg="#f5f5f5",
-                             command=self._on_image_option_change)
-            rb.pack(anchor=W, pady=1)
-
-        self.btn_preview_image = Button(self.left_panel, text="画像をプレビュー",
-                                         font=("Yu Gothic UI", 9), bg="#0288D1", fg="white",
-                                         command=self._preview_image, state=DISABLED)
-        self.btn_preview_image.pack(fill=X, pady=2)
-
-        # 採否ボタン
-        action_lf = ttk.LabelFrame(self.left_panel, text="採否決定", padding=8)
-        action_lf.pack(fill=X, pady=(0, 6))
+        # 採否ボタン（下部固定エリア内）
+        action_lf = ttk.LabelFrame(bottom_frame, text="採否決定", padding=6)
+        action_lf.pack(fill=X, pady=(0, 4))
 
         self.btn_adopt = Button(action_lf, text="採用して次へ ▶",
                                  font=("Yu Gothic UI", 11, "bold"),
@@ -271,23 +262,73 @@ class ArticleCuratorApp:
                                   command=self._reject, state=DISABLED)
         self.btn_reject.pack(fill=X, pady=2)
 
-        self.btn_prev = Button(action_lf, text="◀ 前の記事へ戻る",
+        btn_sub_frame = Frame(action_lf, bg="#f5f5f5")
+        btn_sub_frame.pack(fill=X, pady=2)
+
+        self.btn_prev = Button(btn_sub_frame, text="◀ 前へ戻る",
                                 font=("Yu Gothic UI", 10),
                                 bg="#546E7A", fg="white",
                                 command=self._go_prev, state=DISABLED)
-        self.btn_prev.pack(fill=X, pady=2)
+        self.btn_prev.pack(side=LEFT, fill=X, expand=True, padx=(0, 2))
 
-        self.btn_finish = Button(action_lf, text="完了（キュレーション終了）",
+        self.btn_finish = Button(btn_sub_frame, text="完了",
                                   font=("Yu Gothic UI", 10),
                                   bg="#5C6BC0", fg="white",
                                   command=self._finish, state=DISABLED)
-        self.btn_finish.pack(fill=X, pady=2)
+        self.btn_finish.pack(side=LEFT, fill=X, expand=True, padx=(2, 0))
 
-        # ステータス
-        self.status_label = Label(self.left_panel, text="フォルダを選択してください",
-                                   font=("Yu Gothic UI", 9), fg="#333", bg="#f5f5f5",
-                                   wraplength=380, justify=LEFT)
-        self.status_label.pack(fill=X, pady=4)
+        # ===== 上部スクロール可能エリア: 画像プレビュー + 画像選択 =====
+        top_canvas = Canvas(self.left_panel, bg="#f5f5f5", highlightthickness=0)
+        top_scrollbar = ttk.Scrollbar(self.left_panel, orient=VERTICAL, command=top_canvas.yview)
+        top_canvas.configure(yscrollcommand=top_scrollbar.set)
+        top_scrollbar.pack(side=RIGHT, fill=Y)
+        top_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
+        top_inner = Frame(top_canvas, bg="#f5f5f5")
+        top_canvas_window = top_canvas.create_window((0, 0), window=top_inner, anchor="nw")
+
+        def _on_top_inner_configure(e):
+            top_canvas.configure(scrollregion=top_canvas.bbox("all"))
+        def _on_top_canvas_configure(e):
+            top_canvas.itemconfig(top_canvas_window, width=e.width)
+        top_inner.bind("<Configure>", _on_top_inner_configure)
+        top_canvas.bind("<Configure>", _on_top_canvas_configure)
+
+        # マウスホイールでスクロール
+        def _on_mousewheel(e):
+            top_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        top_canvas.bind("<MouseWheel>", _on_mousewheel)
+        top_inner.bind("<MouseWheel>", _on_mousewheel)
+
+        # 画像プレビューキャンバス（上部エリア内）
+        img_lf = ttk.LabelFrame(top_inner, text="アイキャッチ画像プレビュー", padding=4)
+        img_lf.pack(fill=X, pady=(0, 4))
+        self.img_canvas = Canvas(img_lf, width=370, height=190, bg="#cccccc")
+        self.img_canvas.pack()
+        self.img_label_text = Label(img_lf, text="画像なし", font=("Yu Gothic UI", 9), fg="#888")
+        self.img_label_text.pack()
+
+        # 画像選択オプション（上部エリア内）
+        opt_lf = ttk.LabelFrame(top_inner, text="アイキャッチ画像の選択", padding=6)
+        opt_lf.pack(fill=X, pady=(0, 4))
+
+        options = [
+            ("keep", "そのまま使用（記事内画像）"),
+            ("library", "WPライブラリから選択"),
+            ("ai_generate", "AI新規生成（Imagen）"),
+            ("chart_generate", "グラフ読取＆再デザイン描画"),
+        ]
+        for val, label in options:
+            rb = Radiobutton(opt_lf, text=label, variable=self.image_option, value=val,
+                             font=("Yu Gothic UI", 10), bg="#f5f5f5",
+                             command=self._on_image_option_change)
+            rb.pack(anchor=W, pady=1)
+            rb.bind("<MouseWheel>", _on_mousewheel)
+
+        self.btn_preview_image = Button(top_inner, text="画像をプレビュー",
+                                         font=("Yu Gothic UI", 9), bg="#0288D1", fg="white",
+                                         command=self._preview_image, state=DISABLED)
+        self.btn_preview_image.pack(fill=X, pady=(0, 4))
 
         # ----- 右パネル（伸縮）: 記事番号・タイトル・本文 -----
         right_panel = Frame(main_frame, bg="#f5f5f5")
@@ -441,7 +482,21 @@ class ArticleCuratorApp:
         image_url = self.current_article.get("image_url", "")
         if not image_url:
             self.img_canvas.delete("all")
-            self.img_label_text.config(text="画像なし")
+            # ★ 画像なしは目立つ警告表示（採用ブロックと対応）
+            self.img_canvas.create_rectangle(0, 0, 370, 190, fill="#fff3e0", outline="#e65100", width=2)
+            self.img_canvas.create_text(
+                185, 80,
+                text="⚠ この記事には画像がありません",
+                fill="#c62828", font=("Yu Gothic UI", 10, "bold"),
+                width=350, justify="center",
+            )
+            self.img_canvas.create_text(
+                185, 120,
+                text="採用するには\n「AI新規生成」または「WPライブラリから選択」\nを選んでください",
+                fill="#e65100", font=("Yu Gothic UI", 9),
+                width=350, justify="center",
+            )
+            self.img_label_text.config(text="⚠ 画像なし — 採用には別途画像の選択が必要です", fg="#c62828")
             self.current_image = None
             return
         threading.Thread(
@@ -459,11 +514,11 @@ class ArticleCuratorApp:
             self.current_image = None
             return
         self.current_image = img
-        # 380x213にフィット
+        # 370x190にフィット
         img_copy = img.copy()
-        img_copy.thumbnail((380, 213), PILImage.LANCZOS)
+        img_copy.thumbnail((370, 190), PILImage.LANCZOS)
         self._tk_image = ImageTk.PhotoImage(img_copy)
-        self.img_canvas.create_image(190, 106, image=self._tk_image)
+        self.img_canvas.create_image(185, 95, image=self._tk_image)
         self.img_label_text.config(text=f"元サイズ: {img.width}x{img.height}")
 
     # ─── 画像オプション変更 ───
@@ -556,12 +611,19 @@ class ArticleCuratorApp:
             self.image_option.set("keep")
             return
 
-        self.status_label.config(text="グラフを解析中...")
+        self.status_label.config(text="記事内のグラフを検索中...")
         self.btn_adopt.config(state=DISABLED)
         self.btn_reject.config(state=DISABLED)
         threading.Thread(target=self._do_generate_chart_image, daemon=True).start()
 
     def _do_generate_chart_image(self):
+        """記事内のグラフ画像からデータを読み取り、同じ数値で新デザインのグラフを描画する。
+        AI画像生成は使用しない（著作権フリーのmatplotlib再描画のみ）。
+
+        ※ detect_chart_in_image（検出ステップ）は廃止。
+           extract_chart_data を直接呼び出し、有効なデータが返ってくれば成功とする。
+           これにより誤検出（Falseの見逃し）を排除する。
+        """
         try:
             if not self.html_files:
                 return
@@ -569,38 +631,83 @@ class ArticleCuratorApp:
             img_urls = get_all_images_from_html(filepath)
 
             chart_data = None
+            tried_count = 0
             for url in img_urls:
-                img = load_image_from_url_or_path(url, filepath.parent)
-                if img is None:
+                img_src = load_image_from_url_or_path(url, filepath.parent)
+                if img_src is None:
                     continue
+                tried_count += 1
                 buf = io.BytesIO()
-                img.save(buf, format="PNG")
+                img_src.save(buf, format="PNG")
                 img_bytes = buf.getvalue()
-                if detect_chart_in_image(img_bytes, GEMINI_API_KEY):
-                    chart_data = extract_chart_data(img_bytes, GEMINI_API_KEY)
-                    if chart_data:
+
+                self.root.after(0, lambda n=tried_count: self.status_label.config(
+                    text=f"画像{n}枚目からグラフデータを抽出中（Gemini解析）..."))
+
+                # 検出ステップをスキップして直接データ抽出を試みる
+                try:
+                    candidate = extract_chart_data(img_bytes, GEMINI_API_KEY)
+                except Exception as ex:
+                    # extract_chart_data が例外を投げた場合（モデルエラーなど）はUIに表示
+                    err_msg = str(ex)
+                    self.root.after(0, lambda m=err_msg: messagebox.showerror(
+                        "API エラー",
+                        f"グラフデータ抽出でエラーが発生しました:\n{m}\n\n"
+                        "GEMINI_API_KEY が設定されているか確認してください。"))
+                    self.root.after(0, lambda: self.image_option.set("keep"))
+                    return
+
+                # 有効なデータ（1点以上）があれば採用
+                if candidate:
+                    has_data = any(
+                        len(s.get("data", [])) > 0
+                        for s in candidate.get("series", [])
+                    )
+                    if has_data:
+                        chart_data = candidate
                         break
 
-            article = self.current_article
-            import tempfile
-            tmp_path = Path(tempfile.mktemp(suffix=".png"))
+            # どの画像からもグラフデータが取れなかった場合
+            if not chart_data:
+                msg = (f"記事内の画像（{tried_count}枚）からグラフデータを抽出できませんでした。\n"
+                       "・画像が複合インフォグラフィックの場合は正確に抽出できないことがあります\n"
+                       "・「そのまま使用」または「AI新規生成」を選択してください。")
+                self.root.after(0, lambda: messagebox.showwarning("データ抽出失敗", msg))
+                self.root.after(0, lambda: self.image_option.set("keep"))
+                return
 
-            if chart_data:
-                result = generate_image_with_chart(
-                    GEMINI_API_KEY, article["title"], article["text"][:500],
-                    chart_data, tmp_path)
-            else:
-                self.root.after(0, lambda: self.status_label.config(
-                    text="グラフが見つからないため通常AI生成にフォールバック"))
-                result = generate_image_with_gemini(
-                    GEMINI_API_KEY, article["title"], article["text"][:500], tmp_path)
+            # グラフデータの概要をログ
+            chart_title = chart_data.get("title", "")
+            chart_type  = chart_data.get("chart_type", "bar")
+            series_list = chart_data.get("series", [])
+            data_count  = sum(len(s.get("data", [])) for s in series_list)
+            self.root.after(0, lambda: self.status_label.config(
+                text=f"データ抽出完了: {chart_type}グラフ / {len(series_list)}系列 / {data_count}点 → 新グラフを描画中..."))
 
-            img = PILImage.open(str(result))
-            self.generated_image = img
-            self.root.after(0, lambda: self._display_image(img))
-            self.root.after(0, lambda: self.status_label.config(text="グラフ解析＆新規画像の生成が完了しました"))
+            # matplotlibで同じ数値・新デザインのグラフを描画（1920×1080）
+            chart_img = render_chart_image(chart_data, width=1920, height=1080)
+
+            if chart_img is None:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "描画失敗",
+                    "グラフの再描画に失敗しました。\n"
+                    "matplotlib / numpy がインストールされているか確認してください。"))
+                self.root.after(0, lambda: self.image_option.set("keep"))
+                return
+
+            self.generated_image = chart_img
+            self.root.after(0, lambda: self._display_image(chart_img))
+
+            # 完了ステータス
+            summary = f"再描画完了: {chart_type}グラフ"
+            if chart_title:
+                summary += f"「{chart_title}」"
+            summary += f" / {len(series_list)}系列 / {data_count}データポイント（著作権フリー）"
+            self.root.after(0, lambda msg=summary: self.status_label.config(text=msg))
+
         except Exception as e:
-            self.root.after(0, lambda err=str(e): messagebox.showerror("生成失敗", f"グラフ画像生成に失敗しました:\n{err}"))
+            self.root.after(0, lambda err=str(e): messagebox.showerror(
+                "エラー", f"グラフ再描画に失敗しました:\n{err}"))
             self.root.after(0, lambda: self.image_option.set("keep"))
         finally:
             self.root.after(0, lambda: self.btn_adopt.config(state=NORMAL))
@@ -612,6 +719,27 @@ class ArticleCuratorApp:
         if not self.html_files or self.current_index >= len(self.html_files):
             return
         filepath = self.html_files[self.current_index]
+
+        # ── 図なし採用チェック（画像がない状態で採用されることを防ぐ）──
+        option = self.image_option.get()
+        if option == "keep":
+            if not self.current_article.get("image_url", ""):
+                messagebox.showwarning(
+                    "採用不可 — 画像なし",
+                    "この記事にはアイキャッチ画像がありません。\n\n"
+                    "採用するには以下のいずれかを選択してください：\n"
+                    "  ① 「AI新規生成（Imagen）」で新しい画像を作成\n"
+                    "  ② 「WPライブラリから選択」で既存画像を選ぶ\n\n"
+                    "画像を用意できない場合は「不採用にして次へ」を押してください。")
+                return
+        elif option in ("library", "ai_generate", "chart_generate"):
+            if self.generated_image is None:
+                messagebox.showwarning(
+                    "採用不可 — 画像未選択",
+                    "画像がまだ生成・選択されていません。\n"
+                    "「画像をプレビュー」ボタンで画像を生成・選択してから\n"
+                    "もう一度「採用して次へ」を押してください。")
+                return
 
         # アイキャッチ画像を確定・保存
         eyecatch_path = self._save_eyecatch_image(filepath)
@@ -625,6 +753,7 @@ class ArticleCuratorApp:
         curation.setdefault("articles", {})[filepath.name] = "adopted"
         curation["adopted_count"] = sum(1 for v in curation["articles"].values() if v == "adopted")
         curation["rejected_count"] = sum(1 for v in curation["articles"].values() if v == "rejected")
+        self._auto_complete_if_done(curation)
         save_pipeline_state(self.folder, self.pipeline_state)
 
         info = f"採用: {filepath.name}"
@@ -755,6 +884,7 @@ class ArticleCuratorApp:
         curation.setdefault("articles", {})[filepath.name] = "rejected"
         curation["adopted_count"] = sum(1 for v in curation["articles"].values() if v == "adopted")
         curation["rejected_count"] = sum(1 for v in curation["articles"].values() if v == "rejected")
+        self._auto_complete_if_done(curation)
         save_pipeline_state(self.folder, self.pipeline_state)
 
         self.status_label.config(text=f"不採用: {filepath.name} → {new_name}")
@@ -770,6 +900,18 @@ class ArticleCuratorApp:
             self._show_article()
 
     # ─── 完了 ───
+
+    def _auto_complete_if_done(self, curation: dict):
+        """全記事に採用/不採用の判定が付いたら自動的に completed に設定する"""
+        articles = curation.get("articles", {})
+        if not articles:
+            return
+        all_decided = all(v in ("adopted", "rejected") for v in articles.values())
+        # html_files に含まれる全ファイルが判定済みかも確認
+        total = len(self.html_files) if hasattr(self, "html_files") else 0
+        if all_decided and len(articles) >= total and curation.get("status") != "completed":
+            curation["status"] = "completed"
+            curation["completed_at"] = datetime.now().isoformat(timespec="seconds")
 
     def _finish(self):
         if not self.folder:
@@ -806,147 +948,274 @@ class ArticleCuratorApp:
 # ─── WPメディアライブラリ選択ダイアログ ───
 
 class MediaLibraryDialog:
+    # サムネイルサイズ（幅×高さ）とセル幅（padding込み）
+    THUMB_W, THUMB_H = 170, 96
+    CELL_W = THUMB_W + 16   # 186px
+
     def __init__(self, parent, wp_client: "WordPressClient"):
         self.top = tk.Toplevel(parent)
         self.top.title("WPメディアライブラリから画像を選択")
-        self.top.geometry("880x640")
         self.top.resizable(True, True)
         self.top.grab_set()
+
+        # 最大化で開く
+        self.top.state("zoomed")
 
         self.wp_client = wp_client
         self.selected_image = None
         self._thumbnails = []
         self._page = 1
-        self._per_page = 20
+        self._per_page = 40          # 1ページあたり件数を増加
+        self._current_items: list = []  # 最後に取得したアイテム（リサイズ再描画用）
+        self._resize_job = None         # リサイズdebounce用
 
         self._build_ui()
-        threading.Thread(target=self._load_media, daemon=True).start()
+        # 最大化後のウィンドウサイズが確定してから読み込む
+        self.top.after(150, lambda: threading.Thread(target=self._load_media, daemon=True).start())
 
     def _build_ui(self):
         top = self.top
 
-        # 検索バー
-        search_frame = Frame(top, pady=6, padx=8)
+        # ===== 検索バー =====
+        search_frame = Frame(top, bg="#f0f0f0", pady=6, padx=10)
         search_frame.pack(fill=X)
-        Label(search_frame, text="検索:", font=("Yu Gothic UI", 10)).pack(side=LEFT)
+
+        Label(search_frame, text="キーワード検索:", font=("Yu Gothic UI", 10),
+              bg="#f0f0f0").pack(side=LEFT)
         self.search_var = StringVar()
-        search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30,
-                                  font=("Yu Gothic UI", 10))
-        search_entry.pack(side=LEFT, padx=4)
-        Button(search_frame, text="検索", font=("Yu Gothic UI", 10),
-               bg="#1565C0", fg="white",
-               command=lambda: threading.Thread(target=self._load_media, daemon=True).start()
-               ).pack(side=LEFT)
+        self._search_entry = ttk.Entry(search_frame, textvariable=self.search_var,
+                                       width=40, font=("Yu Gothic UI", 10))
+        self._search_entry.pack(side=LEFT, padx=(4, 6))
 
-        self.status_label = Label(top, text="読み込み中...", font=("Yu Gothic UI", 9), fg="#555")
-        self.status_label.pack(anchor=W, padx=8)
+        def _do_search():
+            self._page = 1          # 検索時はページを先頭に戻す
+            threading.Thread(target=self._load_media, daemon=True).start()
 
-        # スクロール可能なサムネイルグリッド
+        self._search_entry.bind("<Return>", lambda e: _do_search())
+        Button(search_frame, text="  検索  ", font=("Yu Gothic UI", 10),
+               bg="#1565C0", fg="white", command=_do_search).pack(side=LEFT)
+
+        Button(search_frame, text="クリア", font=("Yu Gothic UI", 9),
+               command=lambda: (self.search_var.set(""), _do_search())
+               ).pack(side=LEFT, padx=4)
+
+        self.status_label = Label(top, text="読み込み中...",
+                                   font=("Yu Gothic UI", 9), fg="#555", anchor=W)
+        self.status_label.pack(fill=X, padx=10, pady=(0, 2))
+
+        # ===== サムネイルグリッド（縦スクロールのみ） =====
         canvas_frame = Frame(top)
-        canvas_frame.pack(fill=BOTH, expand=True, padx=8, pady=4)
+        canvas_frame.pack(fill=BOTH, expand=True, padx=8, pady=(0, 4))
 
-        self.canvas = Canvas(canvas_frame, bg="#eeeeee")
+        self.canvas = Canvas(canvas_frame, bg="#e8e8e8", highlightthickness=0)
         scroll_y = Scrollbar(canvas_frame, orient=VERTICAL, command=self.canvas.yview)
-        scroll_x = Scrollbar(canvas_frame, orient=HORIZONTAL, command=self.canvas.xview)
-        self.canvas.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self.canvas.configure(yscrollcommand=scroll_y.set)
 
         scroll_y.pack(side=RIGHT, fill=Y)
-        scroll_x.pack(side=BOTTOM, fill=X)
         self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
 
-        self.grid_frame = Frame(self.canvas, bg="#eeeeee")
+        self.grid_frame = Frame(self.canvas, bg="#e8e8e8")
         self.canvas_window = self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
-        self.grid_frame.bind("<Configure>",
-                              lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
 
-        # ページナビ
-        nav_frame = Frame(top, pady=4)
-        nav_frame.pack(fill=X, padx=8)
-        Button(nav_frame, text="◀ 前のページ", command=self._prev_page,
-               font=("Yu Gothic UI", 10)).pack(side=LEFT, padx=4)
-        Button(nav_frame, text="次のページ ▶", command=self._next_page,
-               font=("Yu Gothic UI", 10)).pack(side=LEFT, padx=4)
-        Button(nav_frame, text="キャンセル", command=self.top.destroy,
-               font=("Yu Gothic UI", 10), fg="red").pack(side=RIGHT, padx=4)
+        # grid_frameのサイズ変化 → スクロール領域を更新
+        self.grid_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        # canvasの幅変化 → grid_frameをcanvas幅に合わせる & 列数を再計算
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
+
+        # マウスホイール
+        self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(
+            int(-1 * (e.delta / 120)), "units"))
+
+        # ===== ページナビ（下部） =====
+        nav_frame = Frame(top, bg="#f0f0f0", pady=5, padx=10)
+        nav_frame.pack(fill=X, side=BOTTOM)
+
+        self.btn_prev_page = Button(nav_frame, text="◀ 前のページ",
+                                     font=("Yu Gothic UI", 10), command=self._prev_page)
+        self.btn_prev_page.pack(side=LEFT, padx=4)
+
+        self.btn_next_page = Button(nav_frame, text="次のページ ▶",
+                                     font=("Yu Gothic UI", 10), command=self._next_page)
+        self.btn_next_page.pack(side=LEFT, padx=4)
+
+        self.page_label = Label(nav_frame, text="", font=("Yu Gothic UI", 9),
+                                 bg="#f0f0f0", fg="#555")
+        self.page_label.pack(side=LEFT, padx=10)
+
+        Button(nav_frame, text="キャンセル", font=("Yu Gothic UI", 10),
+               fg="red", command=self.top.destroy).pack(side=RIGHT, padx=4)
+
+    # ── リサイズ時の再レイアウト ──
+
+    def _on_canvas_resize(self, event):
+        """canvasリサイズ時: grid_frameを同幅に、列数を再計算して再描画"""
+        new_w = event.width
+        self.canvas.itemconfig(self.canvas_window, width=new_w)
+        # debounce: 300ms後に再描画
+        if self._resize_job:
+            self.top.after_cancel(self._resize_job)
+        self._resize_job = self.top.after(300, self._rerender_grid)
+
+    def _get_cols(self) -> int:
+        """現在のcanvas幅から適切な列数を計算"""
+        w = self.canvas.winfo_width()
+        if w < 100:
+            w = self.top.winfo_width() - 40
+        return max(2, w // self.CELL_W)
+
+    def _rerender_grid(self):
+        """現在のアイテムを新しい列数で再描画"""
+        if self._current_items:
+            self._show_thumbnails(self._current_items)
+
+    # ── メディア読み込み ──
 
     def _load_media(self):
         try:
-            keyword = self.search_var.get().strip() if hasattr(self, "search_var") else ""
-            params = {"per_page": self._per_page, "page": self._page, "media_type": "image"}
+            self.top.after(0, lambda: self.status_label.config(text="読み込み中..."))
+            keyword = self.search_var.get().strip()
+            params = {
+                "per_page": self._per_page,
+                "page": self._page,
+                "media_type": "image",
+                "orderby": "date",
+                "order": "desc",
+            }
             if keyword:
+                # WordPress REST API: search はタイトル・説明・ファイル名を対象
                 params["search"] = keyword
+
             import requests as _req
             resp = _req.get(
                 f"{self.wp_client.api_url}/media",
                 auth=self.wp_client.auth,
                 params=params,
-                timeout=15,
+                timeout=20,
             )
             if resp.status_code != 200:
-                self.top.after(0, lambda: self.status_label.config(text=f"読込失敗: HTTP {resp.status_code}"))
+                self.top.after(0, lambda c=resp.status_code: self.status_label.config(
+                    text=f"読込失敗: HTTP {c}"))
                 return
+
             items = resp.json()
-            self.top.after(0, lambda: self._show_thumbnails(items))
+            # X-WP-Total ヘッダーから総件数を取得
+            total = int(resp.headers.get("X-WP-Total", len(items)))
+            total_pages = int(resp.headers.get("X-WP-TotalPages", 1))
+
+            self.top.after(0, lambda: self._on_media_loaded(items, total, total_pages))
         except Exception as e:
-            self.top.after(0, lambda err=str(e): self.status_label.config(text=f"エラー: {err[:80]}"))
+            self.top.after(0, lambda err=str(e): self.status_label.config(
+                text=f"エラー: {err[:100]}"))
+
+    def _on_media_loaded(self, items: list, total: int, total_pages: int):
+        self._current_items = items
+        keyword = self.search_var.get().strip()
+        kw_info = f'「{keyword}」の検索結果: ' if keyword else ""
+        self.status_label.config(
+            text=f"{kw_info}全{total}件中 {(self._page-1)*self._per_page+1}〜"
+                 f"{min(self._page*self._per_page, total)}件表示")
+        self.page_label.config(text=f"ページ {self._page} / {total_pages}")
+        self.btn_prev_page.config(state=NORMAL if self._page > 1 else DISABLED)
+        self.btn_next_page.config(state=NORMAL if self._page < total_pages else DISABLED)
+        self._show_thumbnails(items)
+
+    # ── サムネイル表示 ──
 
     def _show_thumbnails(self, items: list):
-        # グリッドをクリア
+        # 既存ウィジェットをクリア
         for w in self.grid_frame.winfo_children():
             w.destroy()
         self._thumbnails.clear()
 
         if not items:
             Label(self.grid_frame, text="画像が見つかりません",
-                  font=("Yu Gothic UI", 11), bg="#eeeeee").pack(padx=20, pady=20)
-            self.status_label.config(text="画像なし")
+                  font=("Yu Gothic UI", 11), bg="#e8e8e8", pady=30).pack()
             return
 
-        self.status_label.config(text=f"{len(items)}件表示")
-        cols = 4
+        cols = self._get_cols()
+        tw, th = self.THUMB_W, self.THUMB_H
+
         for i, item in enumerate(items):
             row, col = divmod(i, cols)
-            thumb_url = (item.get("media_details", {}).get("sizes", {})
-                         .get("thumbnail", {}).get("source_url", "")
+            # medium サイズを優先（thumbnail より高解像度）
+            sizes = item.get("media_details", {}).get("sizes", {})
+            thumb_url = (sizes.get("medium", {}).get("source_url", "")
+                         or sizes.get("thumbnail", {}).get("source_url", "")
                          or item.get("source_url", ""))
-            cell = Frame(self.grid_frame, bg="#eeeeee", padx=4, pady=4)
-            cell.grid(row=row, column=col, sticky="nw")
+            full_url   = item.get("source_url", "")
+            img_title  = item.get("title", {}).get("rendered", "")
 
-            btn = Button(cell, text="選択", font=("Yu Gothic UI", 9), bg="#1565C0", fg="white")
-            btn.pack()
+            cell = Frame(self.grid_frame, bg="#e8e8e8", padx=3, pady=3)
+            cell.grid(row=row, column=col, sticky="nw", padx=2, pady=2)
 
-            # サムネイルを非同期ロード
-            full_url = item.get("source_url", "")
+            # ─ 固定サイズ Canvas（サムネイル表示エリア） ─
+            # Canvas を使うことで縦長・横長に関わらず常に tw×th の矩形で表示
+            thumb_canvas = Canvas(cell, width=tw, height=th,
+                                   bg="#aaaaaa", cursor="hand2",
+                                   highlightthickness=1,
+                                   highlightbackground="#888888")
+            thumb_canvas.pack()
+            # 読込中テキスト
+            thumb_canvas.create_text(tw // 2, th // 2, text="読込中...",
+                                      fill="#555555", font=("Yu Gothic UI", 8))
+
+            # ファイル名ラベル
+            short_name = (img_title[:24] + "…") if len(img_title) > 24 else img_title
+            Label(cell, text=short_name, font=("Yu Gothic UI", 7),
+                  bg="#e8e8e8", fg="#555", wraplength=tw, anchor=W).pack(fill=X)
+
+            # 選択ボタン
+            select_btn = Button(cell, text="選択", font=("Yu Gothic UI", 8),
+                                 bg="#1565C0", fg="white", pady=1, state=DISABLED)
+            select_btn.pack(fill=X)
+
             threading.Thread(
                 target=self._load_thumbnail,
-                args=(thumb_url, full_url, btn, item.get("title", {}).get("rendered", "")),
-                daemon=True
+                args=(thumb_url, full_url, thumb_canvas, select_btn, img_title),
+                daemon=True,
             ).start()
 
-    def _load_thumbnail(self, thumb_url: str, full_url: str, btn: Button, title: str):
+    def _load_thumbnail(self, thumb_url: str, full_url: str,
+                        thumb_canvas: "Canvas", btn: "Button", title: str):
         try:
+            tw, th = self.THUMB_W, self.THUMB_H
             img = load_image_from_url_or_path(thumb_url, BASE_DIR)
             if img is None:
                 img = load_image_from_url_or_path(full_url, BASE_DIR)
-            if img:
-                img.thumbnail((160, 90), PILImage.LANCZOS)
-                tk_img = ImageTk.PhotoImage(img)
-                self._thumbnails.append(tk_img)
 
-                def _setup(btn=btn, tk_img=tk_img, full_url=full_url):
-                    btn.config(image=tk_img, compound="top",
-                               command=lambda: self._select(full_url))
-                    btn.image = tk_img
+            if img:
+                # センタークロップで必ず tw×th の固定矩形に
+                img_fitted = _fit_cover_pil(img, tw, th)
+                tk_img = ImageTk.PhotoImage(img_fitted)
+                self._thumbnails.append(tk_img)  # GC防止
+
+                def _setup(c=thumb_canvas, b=btn, ti=tk_img, fu=full_url):
+                    c.delete("all")
+                    c.create_image(0, 0, anchor="nw", image=ti)
+                    c.image = ti  # GC防止
+                    c.bind("<Button-1>", lambda e, u=fu: self._select(u))
+                    b.config(state=NORMAL, command=lambda u=fu: self._select(u))
 
                 self.top.after(0, _setup)
             else:
-                self.top.after(0, lambda: btn.config(
-                    command=lambda: self._select(full_url), text=title[:20] or "選択"))
+                # 画像取得失敗時はテキスト表示
+                short = (title[:20] + "…") if len(title) > 20 else (title or "---")
+                def _fail(c=thumb_canvas, b=btn, fu=full_url, s=short):
+                    c.delete("all")
+                    c.create_text(tw // 2, th // 2, text=s,
+                                   fill="#555", font=("Yu Gothic UI", 8),
+                                   width=tw - 8)
+                    b.config(state=NORMAL, command=lambda u=fu: self._select(u))
+                self.top.after(0, _fail)
         except Exception:
             pass
 
     def _select(self, url: str):
         try:
+            self.top.after(0, lambda: self.status_label.config(text="画像を取得中..."))
             img = load_image_from_url_or_path(url, BASE_DIR)
             self.selected_image = img
         except Exception:

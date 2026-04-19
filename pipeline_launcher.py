@@ -163,6 +163,8 @@ class PipelineLauncherApp:
         self._stage_widgets: list[dict] = []
         self._processes: dict[str, subprocess.Popen] = {}
         self._poll_job = None
+        # コンボ表示名（"〇 フォルダ名" など）→ 実際のフォルダ名 のマッピング
+        self._display_to_folder: dict[str, str] = {}
 
         self._build_ui()
         self._populate_folder_list()
@@ -286,22 +288,54 @@ class PipelineLauncherApp:
 
     # ─── フォルダ一覧 ───
 
+    @staticmethod
+    def _is_folder_complete(folder: Path) -> bool:
+        """WeeklyReport PDF とポッドキャスト MP3 の両方が生成済みなら True"""
+        try:
+            state_file = folder / "_pipeline_state.json"
+            if not state_file.exists():
+                return False
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            gen = state.get("stages", {}).get("generation", {})
+            pdf_path = gen.get("pdf_path")
+            mp3_path = gen.get("mp3_path")
+            return bool(pdf_path and Path(pdf_path).exists()
+                        and mp3_path and Path(mp3_path).exists())
+        except Exception:
+            return False
+
+    def _make_display_name(self, folder_name: str) -> str:
+        """フォルダ名から表示名（完了時は '〇 ' プレフィックス付き）を返す"""
+        folder = OUTPUT_DIR / folder_name
+        return f"〇 {folder_name}" if self._is_folder_complete(folder) else folder_name
+
     def _populate_folder_list(self):
         if not OUTPUT_DIR.exists():
             return
-        folders = sorted(
-            [d.name for d in OUTPUT_DIR.iterdir() if d.is_dir() and not d.name.startswith("_")],
+        folder_names = sorted(
+            [d.name for d in OUTPUT_DIR.iterdir()
+             if d.is_dir() and not d.name.startswith("_")],
             reverse=True,
         )
-        self.folder_combo["values"] = folders
-        if folders:
-            self.folder_combo.set(folders[0])
-            self._load_folder(OUTPUT_DIR / folders[0])
+        # 表示名を生成してマッピングを構築
+        self._display_to_folder = {}
+        display_names = []
+        for name in folder_names:
+            display = self._make_display_name(name)
+            self._display_to_folder[display] = name
+            display_names.append(display)
+
+        self.folder_combo["values"] = display_names
+        if display_names:
+            self.folder_combo.set(display_names[0])
+            self._load_folder(OUTPUT_DIR / folder_names[0])
 
     def _on_folder_combo_select(self, event=None):
-        name = self.folder_var.get()
-        if name:
-            self._load_folder(OUTPUT_DIR / name)
+        display = self.folder_var.get()
+        if display:
+            # 表示名（"〇 xxx" or "xxx"）から実フォルダ名を逆引きして読み込み
+            actual = self._display_to_folder.get(display, display)
+            self._load_folder(OUTPUT_DIR / actual)
 
     def _select_folder(self):
         folder = filedialog.askdirectory(
@@ -322,6 +356,7 @@ class PipelineLauncherApp:
         new_folder.mkdir(exist_ok=True)
         self._log(f"フォルダ作成: {name}")
         self._populate_folder_list()
+        # 新規フォルダはまだ未完了なので 〇 なしの表示名
         self.folder_combo.set(name)
         self._load_folder(new_folder)
 
@@ -330,12 +365,15 @@ class PipelineLauncherApp:
         self.pipeline_state = load_pipeline_state(folder)
         self.folder_status.config(text=folder.name)
 
-        # コンボに反映
-        if folder.name not in list(self.folder_combo["values"]):
+        # このフォルダの表示名（〇付き or なし）を取得
+        display = self._make_display_name(folder.name)
+        # マッピングに登録されていなければ追加
+        if display not in self._display_to_folder:
+            self._display_to_folder[display] = folder.name
             vals = list(self.folder_combo["values"])
-            vals.insert(0, folder.name)
+            vals.insert(0, display)
             self.folder_combo["values"] = vals
-        self.folder_var.set(folder.name)
+        self.folder_var.set(display)
 
         self._log(f"フォルダ読み込み: {folder.name}")
         self._update_stage_display()
@@ -368,6 +406,18 @@ class PipelineLauncherApp:
             if new_state != self.pipeline_state:
                 self.pipeline_state = new_state
                 self._update_stage_display()
+                # 完了状態が変わった可能性があるのでコンボの表示名を更新
+                new_display = self._make_display_name(self.folder.name)
+                current_display = self.folder_var.get()
+                if new_display != current_display:
+                    # マッピングを更新して表示名を切り替える
+                    if current_display in self._display_to_folder:
+                        del self._display_to_folder[current_display]
+                    self._display_to_folder[new_display] = self.folder.name
+                    vals = [new_display if v == current_display else v
+                            for v in self.folder_combo["values"]]
+                    self.folder_combo["values"] = vals
+                    self.folder_var.set(new_display)
 
         # 終了したプロセスをクリーンアップ
         finished = [k for k, p in self._processes.items() if p.poll() is not None]
