@@ -298,11 +298,11 @@ def generate_wav(text: str, narrator: str, output_path: Path,
         if _cancel_ongoing_synthesis.is_set():
             return False
 
-        # 既存ファイルを必ず削除してからVoicePeakを呼ぶ。
-        # VoicePeakはOS・バージョンによって既存ファイルを上書きせず
-        # 終了コード0で無視することがある。削除しないと古い音声が残り続ける。
+        # 前回の失敗ファイルが残っていたら除去（破損WAVの再利用防止）
+        # ※ 有効なWAVは削除しない。呼び出し元で変更セグメントのWAVを事前に
+        #   削除してからgenerate_wavを呼ぶ方式に統一している。
         try:
-            if output_path.exists():
+            if output_path.exists() and not _is_valid_wav(output_path):
                 output_path.unlink()
         except Exception:
             pass
@@ -1493,6 +1493,11 @@ class PodcastReviewerApp:
             return
 
         self._init_cancel.clear()
+        # VoicePeak が完全終了してから合成を開始する。
+        # 直前の init キャンセルで kill された VoicePeak がまだ生きていると
+        # 次の subprocess.run が起動競合でタイムアウト → 最大450秒フリーズになる。
+        _kill_stale_voicepeak()
+        time.sleep(1.5)
         clear_cancel_synthesis()  # 自分の合成は通すのでフラグ解除
         try:
             self.root.after(0, lambda: self.status_var.set("修正を適用中..."))
@@ -1578,6 +1583,18 @@ class PodcastReviewerApp:
 
             self.root.after(0, lambda t=total_gen: self.status_var.set(
                 f"音声セグメントを生成中... (0/{t})"))
+
+            # 変更セグメントの古いWAVを事前に削除する。
+            # VoicePeakはOSやバージョンによって既存の有効WAVを上書きせず
+            # 終了コード0で無視することがある。削除してから生成を呼ぶことで
+            # 古い音声が残り続ける問題を防ぐ。
+            for _si in changed_indices:
+                _old_wav = self.work_dir / f"seg_{_si:03d}.wav"
+                if _old_wav.exists():
+                    try:
+                        _old_wav.unlink()
+                    except Exception:
+                        pass
 
             # キャンセルフラグを監視しながら生成する。
             # 途中キャンセルされた場合は MP3 を絶対に上書きしない（欠損MP3事故防止）。
@@ -2219,6 +2236,11 @@ class PodcastReviewerApp:
             return
 
         self._init_cancel.clear()
+        # VoicePeak が完全終了してから合成を開始する。
+        # 直前の init キャンセルで kill された VoicePeak がまだ生きていると
+        # 次の subprocess.run が起動競合でタイムアウト → 最大450秒フリーズになる。
+        _kill_stale_voicepeak()
+        time.sleep(1.5)
         clear_cancel_synthesis()  # 自分の合成は通したいので解除
         try:
             # work_dir が未作成なら作成
@@ -2268,6 +2290,17 @@ class PodcastReviewerApp:
             total_gen = len(need_gen)
             self.root.after(0, lambda t=total_gen: self.status_var.set(
                 f"直接修正を適用中... 0/{t}"))
+
+            # 変更セグメントの古いWAVを事前に削除する。
+            # VoicePeakはOSやバージョンによって既存の有効WAVを上書きせず
+            # 終了コード0で無視することがある。
+            for _si in changed_indices:
+                _old_wav = self.work_dir / f"seg_{_si:03d}.wav"
+                if _old_wav.exists():
+                    try:
+                        _old_wav.unlink()
+                    except Exception:
+                        pass
 
             for ci, seg_idx in enumerate(need_gen):
                 # ★ 中止ボタンが押されたらここで抜ける
