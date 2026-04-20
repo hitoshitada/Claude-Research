@@ -298,9 +298,11 @@ def generate_wav(text: str, narrator: str, output_path: Path,
         if _cancel_ongoing_synthesis.is_set():
             return False
 
-        # 前回の失敗ファイルが残っていたら除去（破損WAVの再利用防止）
+        # 既存ファイルを必ず削除してからVoicePeakを呼ぶ。
+        # VoicePeakはOS・バージョンによって既存ファイルを上書きせず
+        # 終了コード0で無視することがある。削除しないと古い音声が残り続ける。
         try:
-            if output_path.exists() and not _is_valid_wav(output_path):
+            if output_path.exists():
                 output_path.unlink()
         except Exception:
             pass
@@ -1525,21 +1527,34 @@ class PodcastReviewerApp:
             new_segments = build_segments(self.dialogue)
 
             # 3. 変更されたセグメントを特定（テキスト・話者・感情タグの変化を検出）
+            # max() を使うことで「旧<新（追加）」「旧>新（削除）」「旧==新（変更のみ）」
+            # すべてのケースを1ループで漏れなく処理する。
+            old_seg_count = len(self.segments)  # backup用に修正前の件数を保持
             changed_indices = []
-            for i in range(min(len(new_segments), len(self.segments))):
-                if i >= len(self.segments):
-                    changed_indices.append(i)
+            for i in range(max(len(new_segments), old_seg_count)):
+                if i >= len(new_segments):
+                    pass  # このインデックスは削除対象（WAVは後でクリーンアップ）
+                elif i >= old_seg_count:
+                    changed_indices.append(i)  # 新規追加セグメント
                 elif (new_segments[i]["text"] != self.segments[i]["text"] or
                       new_segments[i].get("speaker") != self.segments[i].get("speaker") or
                       new_segments[i].get("emotion", "N") != self.segments[i].get("emotion", "N")):
                     changed_indices.append(i)
-            # 新しく追加されたセグメント
-            for i in range(len(self.segments), len(new_segments)):
-                changed_indices.append(i)
 
             self.segments = new_segments
             self._correction_seg_indices = changed_indices
             total_changed = len(changed_indices)
+
+            # ── セグメント数が減った場合、余分な WAV ファイルを削除 ──
+            # 残留ファイルがあると次回の combine_wavs_to_mp3 の strict 検査や
+            # 次の修正の changed_indices 検出に悪影響を与える恐れがある。
+            for i in range(len(new_segments), old_seg_count):
+                stale_wav = self.work_dir / f"seg_{i:03d}.wav"
+                if stale_wav.exists():
+                    try:
+                        stale_wav.unlink()
+                    except Exception:
+                        pass
 
             # seg_durationsをセグメント数に合わせる
             while len(self.seg_durations) < len(self.segments):
@@ -1551,7 +1566,7 @@ class PodcastReviewerApp:
             need_gen = set(changed_indices)
             for i, seg in enumerate(self.segments):
                 wav_path = self.work_dir / f"seg_{i:03d}.wav"
-                if not wav_path.exists():
+                if not _is_valid_wav(wav_path):  # 存在しない or 破損WAVも再生成対象
                     need_gen.add(i)
             need_gen = sorted(need_gen)
 
@@ -1584,12 +1599,13 @@ class PodcastReviewerApp:
                                emotion=seg.get("emotion", "N")):
                     self.seg_durations[seg_idx] = get_wav_duration(wav_path)
 
-            # 5. MP3を再構築（strictモード: 欠損があれば既存MP3を上書きしない）
+            # 5. MP3を再構築（strictモード: 欠損・破損があれば既存MP3を上書きしない）
             # これをしないと、初期化未完了時の修正で MP3 が極端に短く切り詰められる
             # （過去に18MB→1.1MBに縮小した致命的事故あり）。
+            # _is_valid_wav で破損・極短WAVも欠損扱いにして安全性を高める。
             missing_wavs = [
                 i for i in range(len(self.segments))
-                if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+                if not _is_valid_wav(self.work_dir / f"seg_{i:03d}.wav")
             ]
             if missing_wavs or gen_aborted:
                 # MP3 も 原稿ファイル も上書きしない。セグメントだけ更新して警告。
