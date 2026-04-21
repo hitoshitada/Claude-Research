@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import re
+import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -302,6 +303,25 @@ def load_podcast_prompt(topic_name: str) -> str:
             )
 
     return base_prompt
+
+
+def _remove_redundant_alphabet_parens(script_text: str) -> str:
+    """ポッドキャスト原稿からカタカナ読みと重複するアルファベット括弧表記を除去する。
+
+    音声合成で読むと括弧の前後が同じ音になる「繰り返し」を自動除去する。
+    例:
+      「ピーファス（PFAS）規制」 → 「ピーファス規制」
+      「ピーティーエフイー（PTFE）」 → 「ピーティーエフイー」
+      「エルジーエナジソリューション（LG Energy SOLUTION）」 → 「エルジーエナジソリューション」
+
+    括弧内に日本語（意味説明）が含まれる場合は除去しない。
+    例:
+      「シーエーティーエル（中国の大手電池メーカー）」 → そのまま保持
+      「タングステン（W元素）」 → そのまま保持（日本語文字を含むため）
+    """
+    # 括弧内がアルファベット・数字・スペース・ハイフン・ドット・スラッシュのみ
+    # （CJK文字を一切含まない）場合に限り削除する
+    return re.sub(r'（[A-Za-z][A-Za-z0-9\s\-\./]*）', '', script_text)
 
 
 # ─── Gemini API呼び出し ───
@@ -1353,6 +1373,15 @@ class ContentGeneratorApp:
                 script_text = self._build_sample_podcast()
 
             self._log(f"テキスト生成完了（{len(script_text)}字）")
+
+            # カタカナ読みと重複するアルファベット括弧表記を除去
+            # 例: 「ピーファス（PFAS）」→「ピーファス」
+            script_text_clean = _remove_redundant_alphabet_parens(script_text)
+            if script_text_clean != script_text:
+                removed = len(script_text) - len(script_text_clean)
+                self._log(f"括弧アルファベット繰り返しを除去（{removed}字削減）")
+                script_text = script_text_clean
+
             output_path.write_text(script_text, encoding="utf-8")
             self._log(f"原稿ファイル保存: {output_name}")
 
@@ -1490,7 +1519,17 @@ class ContentGeneratorApp:
             # WAV → MP3 結合
             mp3_name = f"{self.topic_name}ポッドキャスト{date_str}.mp3"
             mp3_path = self.folder / mp3_name
-            self._log(f"MP3に結合中: {mp3_name}")
+            # ── 既存MP3の自動バックアップ（上書き事故防止） ──
+            # 同名MP3がすでに存在する場合は _prev_YYYYMMDD_HHMMSS サフィックスで保存してから上書き。
+            if mp3_path.exists():
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_mp3 = mp3_path.with_name(f"{mp3_path.stem}_prev_{ts}.mp3")
+                try:
+                    shutil.copy2(mp3_path, backup_mp3)
+                    self._log(f"既存MP3を自動バックアップ: {backup_mp3.name}")
+                except Exception as _be:
+                    self._log(f"バックアップ失敗（続行）: {_be}")
+            self._log(f"MP3に結合中: {mp3_name}  (出力先フォルダ: {self.folder.name})")
             success = combine_wavs_to_mp3(work_dir, mp3_path, total)
             if success and mp3_path.exists():
                 return mp3_path
@@ -1600,19 +1639,40 @@ class ContentGeneratorApp:
             return
         self._set_buttons(DISABLED)
         self.progress.start()
-        threading.Thread(target=self._do_combine_wavs, args=(work_dir, len(wav_files)), daemon=True).start()
+        # folder / topic_name をボタン押下時点でキャプチャして渡す（race condition防止）
+        threading.Thread(
+            target=self._do_combine_wavs,
+            args=(work_dir, len(wav_files), self.folder, self.topic_name),
+            daemon=True,
+        ).start()
 
-    def _do_combine_wavs(self, work_dir: Path, seg_count: int):
+    def _do_combine_wavs(self, work_dir: Path, seg_count: int,
+                         folder: "Path | None" = None,
+                         topic_name: str = ""):
+        # folder / topic_name はスレッド起動時点の値をキャプチャして受け取る。
+        # self.folder / self.topic_name をスレッド内で直接参照すると
+        # UI操作によって値が変わった際に誤ったパスへ書き込むリスクがある。
+        folder = folder or self.folder
+        topic_name = topic_name or self.topic_name
         try:
             today = datetime.now().strftime("%Y%m%d")
-            mp3_name = f"{self.topic_name}ポッドキャスト{today}.mp3"
-            mp3_path = self.folder / mp3_name
-            self._log(f"既存WAV ({seg_count}個) をMP3に結合中: {mp3_name}")
+            mp3_name = f"{topic_name}ポッドキャスト{today}.mp3"
+            mp3_path = folder / mp3_name
+            # ── 既存MP3の自動バックアップ（上書き事故防止） ──
+            if mp3_path.exists():
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_mp3 = mp3_path.with_name(f"{mp3_path.stem}_prev_{ts}.mp3")
+                try:
+                    shutil.copy2(mp3_path, backup_mp3)
+                    self._log(f"既存MP3を自動バックアップ: {backup_mp3.name}")
+                except Exception as _be:
+                    self._log(f"バックアップ失敗（続行）: {_be}")
+            self._log(f"既存WAV ({seg_count}個) をMP3に結合中: {mp3_name}  (出力先フォルダ: {folder.name})")
             success = combine_wavs_to_mp3(work_dir, mp3_path, seg_count)
             if success and mp3_path.exists():
                 gen_state = self.pipeline_state["stages"]["generation"]
                 gen_state["mp3_path"] = str(mp3_path)
-                save_pipeline_state(self.folder, self.pipeline_state)
+                save_pipeline_state(folder, self.pipeline_state)
                 self._log(f"MP3結合完了: {mp3_name}")
                 self.root.after(0, lambda n=mp3_name: messagebox.showinfo(
                     "完了", f"MP3結合完了\n{n}"))

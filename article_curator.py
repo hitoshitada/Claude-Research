@@ -62,7 +62,7 @@ if WP_ENV_PATH.exists():
     if len(lines) >= 3:
         _wp_env = {"url": lines[0], "username": lines[1], "password": lines[2]}
 
-TARGET_WIDTH, TARGET_HEIGHT = 1920, 1080
+TARGET_WIDTH, TARGET_HEIGHT = 1280, 720
 
 
 # ─── パイプライン状態管理 ───
@@ -684,8 +684,8 @@ class ArticleCuratorApp:
             self.root.after(0, lambda: self.status_label.config(
                 text=f"データ抽出完了: {chart_type}グラフ / {len(series_list)}系列 / {data_count}点 → 新グラフを描画中..."))
 
-            # matplotlibで同じ数値・新デザインのグラフを描画（1920×1080）
-            chart_img = render_chart_image(chart_data, width=1920, height=1080)
+            # matplotlibで同じ数値・新デザインのグラフを描画（1280×720）
+            chart_img = render_chart_image(chart_data, width=1280, height=720)
 
             if chart_img is None:
                 self.root.after(0, lambda: messagebox.showerror(

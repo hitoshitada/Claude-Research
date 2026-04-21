@@ -269,7 +269,8 @@ def _is_valid_wav(path: Path) -> bool:
 
 
 def generate_wav(text: str, narrator: str, output_path: Path,
-                 speaker: str = "F", emotion: str = "N") -> bool:
+                 speaker: str = "F", emotion: str = "N",
+                 force: bool = False) -> bool:
     """VoicePeakでWAV生成（リトライ付き、ハング対策あり、出力検証付き）。
 
     - 各試行前に残留VoicePeakプロセスを掃除
@@ -277,6 +278,8 @@ def generate_wav(text: str, narrator: str, output_path: Path,
     - 生成後はファイルサイズと再生時間で有効性を検証
     - 壊れていたら次の試行でクリーンな状態から再生成
     - 失敗時はstderrをログ出力（デバッグ用）
+    - force=True: 修正適用時に使う。既存の有効WAVも毎回削除して確実に再生成させる。
+      （VoicePeakはOSやバージョンによって既存の有効WAVを上書きせず exit 0 する場合がある）
     """
     ep = _get_emotion_params(speaker, emotion)
     cmd = [
@@ -298,11 +301,13 @@ def generate_wav(text: str, narrator: str, output_path: Path,
         if _cancel_ongoing_synthesis.is_set():
             return False
 
-        # 前回の失敗ファイルが残っていたら除去（破損WAVの再利用防止）
-        # ※ 有効なWAVは削除しない。呼び出し元で変更セグメントのWAVを事前に
-        #   削除してからgenerate_wavを呼ぶ方式に統一している。
+        # 出力先WAVを除去してVoicePeakが必ず新規生成するようにする。
+        # force=True（修正適用時）: 有効なWAVも含め常に削除する。
+        #   VoicePeakはOSやバージョンによって既存の有効WAVを上書きせず
+        #   終了コード0で無視することがあるため、事前削除で確実に再生成させる。
+        # force=False（init等）: 破損・空のWAVのみ削除（有効キャッシュは保持）。
         try:
-            if output_path.exists() and not _is_valid_wav(output_path):
+            if output_path.exists() and (force or not _is_valid_wav(output_path)):
                 output_path.unlink()
         except Exception:
             pass
@@ -726,6 +731,13 @@ class PodcastReviewerApp:
         self._direct_edit_backup_dialogue: list = []
         self._direct_edit_test_process: subprocess.Popen | None = None
         self._direct_edit_temp_dir: Path | None = None
+        # テスト時に生成したセグメントWAVのインデックスと対応するnewセグメントテキスト
+        # 適用時に「テスト済みWAVをコピー」するために使用する
+        self._test_prebuilt_seg_indices: list = []   # 生成済みセグメントインデックスのリスト
+        self._test_prebuilt_seg_texts: dict = {}      # {seg_idx: text} テキスト検証用
+        # unchanged_missing パスで init に MP3 再構築を任せた後、完了時に自動再生する位置。
+        # None の場合は通知なし。_initialize_wavs がMP3を再構築した際に参照する。
+        self._pending_mp3_notify_pos: float | None = None
 
     def _populate_folders(self):
         """出力フォルダ一覧を表示"""
@@ -751,16 +763,18 @@ class PodcastReviewerApp:
         self.topic_name = folder_name.split("_")[0] if "_" in folder_name else folder_name
 
         # ポッドキャストファイルを探す（ファイル名に日付サフィックスが付くパターンなども許容）
-        # MP3: "*ポッドキャスト*.mp3" を幅広くマッチ。バージョン保存の "_v1.mp3" 等は除外。
+        # MP3: "*ポッドキャスト*.mp3" を幅広くマッチ。
+        # バージョン保存の "_v1.mp3" 等と、原版バックアップの "_original.mp3" は除外する。
+        _mp3_backup_pat = re.compile(r"(_v\d+|_original|_prev_\d{8}).*\.mp3$")
         mp3_candidates = [
             f for f in self.selected_folder.glob("*ポッドキャスト*.mp3")
-            if not re.search(r"_v\d+\.mp3$", f.name)
+            if not _mp3_backup_pat.search(f.name)
         ]
         # もし上記で見つからなければ、フォルダ直下の全mp3を対象
         if not mp3_candidates:
             mp3_candidates = [
                 f for f in self.selected_folder.glob("*.mp3")
-                if not re.search(r"_v\d+\.mp3$", f.name)
+                if not _mp3_backup_pat.search(f.name)
             ]
         # 更新日時が新しい順に並べて最新を採用
         mp3_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -927,6 +941,28 @@ class PodcastReviewerApp:
                         except Exception:
                             pass
 
+                    # ★ ハッシュ変化なし（テキスト未変更）でWAVが無い場合：
+                    # _podcast_work に元WAVがあればコピーで高速補完する（VoicePeak不要）。
+                    # ハッシュが変わっている（テキスト変更済み）セグメントはコピーしない。
+                    _pw_used = False
+                    if not wav_path.exists() and (prev_hash is None or prev_hash == cur_hash):
+                        _pw_src_init = (self.selected_folder / "_podcast_work"
+                                        / f"seg_{i:03d}.wav") if self.selected_folder else None
+                        if _pw_src_init and _is_valid_wav(_pw_src_init):
+                            try:
+                                shutil.copy2(str(_pw_src_init), str(wav_path))
+                                self.seg_durations[i] = get_wav_duration(wav_path)
+                                actually_regenerated = True
+                                _pw_used = True
+                                self.root.after(0, lambda v=i+1, t=total: self.status_var.set(
+                                    f"音声セグメント読み込み中... ({v}/{t}) ※元データコピー"))
+                            except Exception:
+                                pass  # コピー失敗 → VoicePeakで再生成
+
+                    if _pw_used:
+                        self.root.after(0, lambda v=i+1: self.progress.config(value=v))
+                        continue
+
                     narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
                     speaker = "女性" if seg["speaker"] == "F" else "男性"
 
@@ -977,6 +1013,12 @@ class PodcastReviewerApp:
                         if new_dur > 0:
                             # _apply_new_duration の内部で _calibrate_seg_durations を呼ぶ
                             self.root.after(0, lambda d=new_dur: self._apply_new_duration(d))
+                        # ★ 直接修正の「unchanged_missing」パスでinitに再構築を依頼されていた場合：
+                        # MP3が完成したので修正開始位置から自動再生してユーザーに通知する。
+                        _notify_pos = self._pending_mp3_notify_pos
+                        if _notify_pos is not None:
+                            self._pending_mp3_notify_pos = None
+                            self.root.after(500, lambda p=_notify_pos: self._notify_direct_apply_done(p))
                     else:
                         # MP3は変わらないが seg_durations が更新されたので較正
                         self.root.after(0, self._calibrate_seg_durations)
@@ -1573,6 +1615,36 @@ class PodcastReviewerApp:
                 wav_path = self.work_dir / f"seg_{i:03d}.wav"
                 if not _is_valid_wav(wav_path):  # 存在しない or 破損WAVも再生成対象
                     need_gen.add(i)
+
+            # ★ _podcast_work から「変更なし・欠損」WAVを高速コピー（VoicePeak不要）
+            # content_generator.py が生成した元WAVが残っている場合、
+            # 未変更セグメントはコピーするだけで済む（数秒で完了）。
+            # 変更セグメントはテキストが変わっているのでコピーせずVoicePeakで再生成。
+            _pw_dir_corr = (self.selected_folder / "_podcast_work"
+                            if self.selected_folder else None)
+            if _pw_dir_corr and _pw_dir_corr.exists():
+                _changed_set_corr = set(changed_indices)
+                _pw_corr_count = 0
+                for _i_corr in list(need_gen):
+                    if _i_corr in _changed_set_corr:
+                        continue  # 変更セグメントはVoicePeakで再生成
+                    _pw_src_corr = _pw_dir_corr / f"seg_{_i_corr:03d}.wav"
+                    _pw_dst_corr = self.work_dir / f"seg_{_i_corr:03d}.wav"
+                    if _is_valid_wav(_pw_src_corr):
+                        try:
+                            shutil.copy2(str(_pw_src_corr), str(_pw_dst_corr))
+                            self.seg_durations[_i_corr] = get_wav_duration(_pw_dst_corr)
+                            _pw_corr_count += 1
+                        except Exception:
+                            pass  # コピー失敗 → need_genに残してVoicePeakで補完
+                if _pw_corr_count > 0:
+                    # コピー成功分を need_gen から除外して再計算
+                    need_gen = {i for i in need_gen
+                                if i in _changed_set_corr
+                                or not _is_valid_wav(self.work_dir / f"seg_{i:03d}.wav")}
+                    self.root.after(0, lambda n=_pw_corr_count: self.status_var.set(
+                        f"元WAVをコピー中... {n}件完了"))
+
             need_gen = sorted(need_gen)
 
             total_gen = len(need_gen)
@@ -1613,7 +1685,8 @@ class PodcastReviewerApp:
 
                 if generate_wav(seg["text"], narrator, wav_path,
                                speaker=seg["speaker"],
-                               emotion=seg.get("emotion", "N")):
+                               emotion=seg.get("emotion", "N"),
+                               force=True):  # 変更セグメント: 既存WAVを強制削除して確実に再生成
                     self.seg_durations[seg_idx] = get_wav_duration(wav_path)
 
             # 5. MP3を再構築（strictモード: 欠損・破損があれば既存MP3を上書きしない）
@@ -1932,39 +2005,43 @@ class PodcastReviewerApp:
         self.status_var.set("直接修正モード — テキストを編集後「修正のテスト」または「修正の適用」を押してください")
 
     def _test_direct_edit(self):
-        """修正箇所前後のテスト音声を生成・再生"""
+        """修正箇所のテスト音声を生成・再生。
+        セグメント単位でフルWAVを生成し適用時に再利用するため、
+        テストと適用で完全に同じ音声を使う。
+        """
         current_text = self.script_display.get("1.0", END)
         new_dialogue = parse_dialogue_script(current_text)
         if not new_dialogue:
             messagebox.showwarning("パースエラー", "テキストをパースできませんでした")
             return
 
-        # 変更された行を特定（テキスト・話者・感情タグの変化を検出）
-        changed = []
-        n = max(len(self._direct_edit_backup_dialogue), len(new_dialogue))
-        for i in range(n):
-            old_l = self._direct_edit_backup_dialogue[i] if i < len(self._direct_edit_backup_dialogue) else None
-            new_l = new_dialogue[i] if i < len(new_dialogue) else None
-            if old_l is None or new_l is None:
-                changed.append((i, old_l, new_l))
-            elif (old_l["text"] != new_l["text"] or
-                  old_l.get("speaker") != new_l.get("speaker") or
-                  old_l.get("emotion", "N") != new_l.get("emotion", "N")):
-                changed.append((i, old_l, new_l))
+        new_segments = build_segments(new_dialogue)
 
-        if not changed:
+        # 変更されたセグメントを特定（セグメント単位で比較）
+        old_segs = self.segments
+        changed_indices = []
+        for i in range(max(len(old_segs), len(new_segments))):
+            if i >= len(new_segments):
+                pass
+            elif i >= len(old_segs):
+                changed_indices.append(i)
+            elif (old_segs[i]["text"] != new_segments[i]["text"] or
+                  old_segs[i].get("speaker") != new_segments[i].get("speaker") or
+                  old_segs[i].get("emotion", "N") != new_segments[i].get("emotion", "N")):
+                changed_indices.append(i)
+
+        if not changed_indices:
             messagebox.showinfo("変更なし", "テキストの変更が検出されませんでした")
             return
 
-        test_segs = self._build_test_segments(changed, new_dialogue)
-        if not test_segs:
-            messagebox.showwarning("テストなし", "テスト用セグメントを構築できませんでした")
-            return
+        # テスト情報をクリアして新しい情報をセット
+        self._test_prebuilt_seg_indices = []
+        self._test_prebuilt_seg_texts = {}
 
         self.btn_test_edit.config(state=DISABLED)
         self.status_var.set("テスト音声を生成中...")
         threading.Thread(target=self._generate_and_play_test,
-                         args=(test_segs,), daemon=True).start()
+                         args=(new_segments, changed_indices), daemon=True).start()
 
     def _build_test_segments(self, changed: list, new_dialogue: list) -> list:
         """変更箇所の前後コンテキストを含むテスト用セグメントリストを構築"""
@@ -2059,8 +2136,13 @@ class PodcastReviewerApp:
 
         return new_text[start:end].strip()
 
-    def _generate_and_play_test(self, test_segs: list):
-        """テスト音声をバックグラウンドで生成・再生"""
+    def _generate_and_play_test(self, new_segments: list, changed_indices: list):
+        """テスト音声をバックグラウンドで生成・再生。
+
+        変更セグメントのフルWAVを temp_dir/seg_{i:03d}.wav として生成する。
+        これにより「修正の適用」時に同じWAVをwork_dirにコピーするだけで済み、
+        テストと適用で完全に同じ音声が使われることを保証する。
+        """
         import tempfile as _tempfile
 
         # 既存テスト再生を停止
@@ -2072,10 +2154,6 @@ class PodcastReviewerApp:
             shutil.rmtree(self._direct_edit_temp_dir, ignore_errors=True)
 
         # バックグラウンド初期化を止めてから自分のgenerate_wavを走らせる。
-        # ポイント: clear_cancel_synthesis() を呼ぶのは _initialize_wavs が
-        # ロックを手放したことを確認してから。
-        # 早まって解除すると _initialize_wavs の generate_wav がリトライし続け、
-        # ロックが解放されず「修正の適用」が永遠に待ち続けることになる。
         self._init_cancel.set()
         _cancel_ongoing_synthesis.set()
         threading.Thread(target=_kill_stale_voicepeak, daemon=True).start()
@@ -2085,7 +2163,6 @@ class PodcastReviewerApp:
             if self._wav_lock.acquire(timeout=0.5):
                 self._wav_lock.release()
                 break
-            # 再kill は3秒間隔で別スレッドから（このスレッドを固めないため）
             now = time.time()
             if now - last_kill_at > 3.0:
                 last_kill_at = now
@@ -2098,38 +2175,71 @@ class PodcastReviewerApp:
         self._direct_edit_temp_dir = tmp_dir
 
         try:
-            wav_names = []
-            idx = 0
-            for seg in test_segs:
+            # 変更セグメントのフルWAVを seg_{i:03d}.wav として生成
+            # （適用時にこのWAVをwork_dirにコピーして音声の一貫性を保つ）
+            prebuilt_indices = []
+            prebuilt_texts = {}
+            for si in changed_indices:
+                if si >= len(new_segments):
+                    continue
+                seg = new_segments[si]
                 if not seg["text"].strip():
                     continue
-                parts = split_long_text(seg["text"])
                 narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
-                for part in parts:
-                    wav_path = tmp_dir / f"t{idx:03d}.wav"
-                    if generate_wav(part, narrator, wav_path,
-                                    speaker=seg["speaker"],
-                                    emotion=seg.get("emotion", "N")):
-                        wav_names.append(wav_path.name)
-                    idx += 1
+                wav_path = tmp_dir / f"seg_{si:03d}.wav"
+                self.root.after(0, lambda v=si: self.status_var.set(
+                    f"テスト音声を生成中... (seg {v})"))
+                if generate_wav(seg["text"], narrator, wav_path,
+                                speaker=seg["speaker"],
+                                emotion=seg.get("emotion", "N"),
+                                force=True):
+                    prebuilt_indices.append(si)
+                    prebuilt_texts[si] = seg["text"]
 
-            if not wav_names:
+            # テスト結果を保存（適用時に再利用）
+            self._test_prebuilt_seg_indices = prebuilt_indices
+            self._test_prebuilt_seg_texts = prebuilt_texts
+
+            if not prebuilt_indices:
                 self.root.after(0, lambda: messagebox.showerror(
                     "生成失敗", "テスト音声の生成に失敗しました"))
                 return
 
-            if len(wav_names) == 1:
-                out_path = tmp_dir / wav_names[0]
+            # 再生用WAVリストを組み立て（前後コンテキスト + 変更セグメント）
+            play_paths = []
+            first_si = min(prebuilt_indices)
+            last_si = max(prebuilt_indices)
+
+            # 直前コンテキスト（work_dir の既存WAV）
+            prev_si = first_si - 1
+            if prev_si >= 0 and self.work_dir:
+                prev_wav = self.work_dir / f"seg_{prev_si:03d}.wav"
+                if _is_valid_wav(prev_wav):
+                    play_paths.append(str(prev_wav))
+
+            # 変更セグメントのテストWAV（生成に成功したもの）
+            for si in sorted(prebuilt_indices):
+                play_paths.append(str(tmp_dir / f"seg_{si:03d}.wav"))
+
+            # 直後コンテキスト（work_dir の既存WAV）
+            next_si = last_si + 1
+            if next_si < len(self.segments) and self.work_dir:
+                next_wav = self.work_dir / f"seg_{next_si:03d}.wav"
+                if _is_valid_wav(next_wav):
+                    play_paths.append(str(next_wav))
+
+            if len(play_paths) == 1:
+                out_path = Path(play_paths[0])
             else:
                 list_file = tmp_dir / "fl.txt"
                 list_file.write_text(
-                    "\n".join(f"file '{n}'" for n in wav_names), encoding="utf-8")
+                    "\n".join(f"file '{p}'" for p in play_paths), encoding="utf-8")
+                out_path = tmp_dir / "test_out.mp3"
                 subprocess.run(
                     ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                     "-i", "fl.txt", "-codec:a", "libmp3lame", "-b:a", "192k",
-                     "test_out.mp3"],
-                    capture_output=True, cwd=str(tmp_dir), timeout=120)
-                out_path = tmp_dir / "test_out.mp3"
+                     "-i", str(list_file), "-codec:a", "libmp3lame", "-b:a", "192k",
+                     str(out_path)],
+                    capture_output=True, timeout=120)
 
             if not out_path.exists():
                 self.root.after(0, lambda: messagebox.showerror(
@@ -2202,6 +2312,25 @@ class PodcastReviewerApp:
 
     def _do_direct_apply(self, new_dialogue: list):
         """直接修正の適用処理（バックグラウンド）"""
+
+        # ═══ デバッグログ（_review_work/_apply_debug.log に追記）═══
+        import datetime as _dt
+        def _dbg(msg: str):
+            try:
+                _log_dir = self.work_dir or (
+                    (self.selected_folder / "_review_work") if self.selected_folder else None)
+                if _log_dir:
+                    _log_dir.mkdir(exist_ok=True)
+                    with open(_log_dir / "_apply_debug.log", "a", encoding="utf-8") as _f:
+                        _f.write(f"{_dt.datetime.now().strftime('%H:%M:%S.%f')[:-3]} {msg}\n")
+            except Exception:
+                pass
+
+        _dbg("=== _do_direct_apply START ===")
+        _dbg(f"  _direct_edit_temp_dir = {self._direct_edit_temp_dir}")
+        _dbg(f"  _test_prebuilt_seg_indices = {self._test_prebuilt_seg_indices}")
+        _dbg(f"  work_dir = {self.work_dir}")
+
         # 走行中のバックグラウンド初期化/テスト合成を止めてロック取得。
         # これをやらないと初期化が未完了のまま combine_wavs_to_mp3 が走り、
         # 部分的なWAV集合だけでMP3が作られて途中で切れてしまう。
@@ -2230,12 +2359,71 @@ class PodcastReviewerApp:
                 threading.Thread(target=_kill_stale_voicepeak, daemon=True).start()
 
         if not acquired:
+            _dbg("ERROR: lock acquisition timed out")
             self.root.after(0, lambda: self.status_var.set(
                 "バックグラウンド処理を中断できませんでした。もう一度「修正の適用」を押してください"))
             self.root.after(0, self._finish_direct_edit_mode)
             return
 
+        _dbg("lock acquired")
         self._init_cancel.clear()
+
+        # ═══════════════════════════════════════════════════════════════
+        # ★ 最優先・同期コピー: テスト済みWAVをwork_dirに即コピー ★
+        #
+        # ここは _wav_lock 取得直後。VoicePeak掃除もスリープも
+        # まだ行っていない = 他スレッドの干渉が最も少ないタイミング。
+        # このタイミングでコピーすることで:
+        # ・_cancel_ongoing_synthesis / _init_cancel の影響を受けない
+        # ・sleep中にフラグ状態が変わっても関係ない
+        # ・テスト時に生成した「確認済み発音」のWAVを必ず使える
+        # ═══════════════════════════════════════════════════════════════
+        _pre_copied_in_apply: set = set()
+        _apply_test_tmp = self._direct_edit_temp_dir          # テストWAV格納ディレクトリ
+        _apply_prebuilt  = list(self._test_prebuilt_seg_indices)  # テスト成功インデックス
+
+        _dbg(f"pre-copy: tmp={_apply_test_tmp}  prebuilt={_apply_prebuilt}")
+
+        if _apply_test_tmp and _apply_prebuilt:
+            # work_dir がまだなければ先に作成（コピー先が必要）
+            _wdir_pre = self.work_dir
+            if not _wdir_pre and self.selected_folder:
+                _wdir_pre = self.selected_folder / "_review_work"
+                _wdir_pre.mkdir(exist_ok=True)
+                self.work_dir = _wdir_pre
+
+            if _wdir_pre:
+                for _si in _apply_prebuilt:
+                    _src = _apply_test_tmp / f"seg_{_si:03d}.wav"
+                    _src_valid = _is_valid_wav(_src)
+                    _dbg(f"  seg {_si:03d}: src={_src}  valid={_src_valid}")
+                    if _src_valid:
+                        _dst = _wdir_pre / f"seg_{_si:03d}.wav"
+                        try:
+                            if _dst.exists():
+                                _dst.unlink()
+                            shutil.copy2(str(_src), str(_dst))
+                            _pre_copied_in_apply.add(_si)
+                            _dbg(f"  seg {_si:03d}: copy OK → {_dst}")
+                        except Exception as _ce:
+                            _dbg(f"  seg {_si:03d}: copy FAILED: {_ce}")
+                            # コピー失敗はステータスに記録してフォールバックへ
+                            self.root.after(0, lambda e=str(_ce), v=_si: self.status_var.set(
+                                f"コピー失敗(seg {v}): {e[:60]}"))
+            else:
+                _dbg("  wdir_pre is None → copy skipped")
+        else:
+            _dbg(f"  pre-copy skipped: tmp={bool(_apply_test_tmp)} prebuilt={bool(_apply_prebuilt)}")
+
+        _dbg(f"pre-copy done: _pre_copied_in_apply={_pre_copied_in_apply}")
+
+        if _pre_copied_in_apply:
+            self.root.after(0, lambda n=len(_pre_copied_in_apply): self.status_var.set(
+                f"テスト済みWAVをコピー完了: {n}件 → VoicePeak再生成なし"))
+        else:
+            self.root.after(0, lambda: self.status_var.set(
+                "テスト未実施 → VoicePeakで再生成します"))
+
         # VoicePeak が完全終了してから合成を開始する。
         # 直前の init キャンセルで kill された VoicePeak がまだ生きていると
         # 次の subprocess.run が起動競合でタイムアウト → 最大450秒フリーズになる。
@@ -2286,15 +2474,32 @@ class PodcastReviewerApp:
             # 全missing再生成は init 未完了時に 30〜60 セグメント生成→3〜10 分フリーズの原因。
             need_gen = sorted(changed_indices)
             changed_set = set(changed_indices)
+            _dbg(f"changed_indices={changed_indices}  need_gen={need_gen}")
 
             total_gen = len(need_gen)
             self.root.after(0, lambda t=total_gen: self.status_var.set(
                 f"直接修正を適用中... 0/{t}"))
 
+            # ── テスト済みWAVはロック取得直後にコピー済み。未コピーのみVoicePeakで再生成 ──
+            still_need_gen = []
+            for seg_idx in need_gen:
+                if seg_idx >= len(self.segments):
+                    continue
+                final_wav = self.work_dir / f"seg_{seg_idx:03d}.wav"
+                _in_precopied = seg_idx in _pre_copied_in_apply
+                _wav_valid = _is_valid_wav(final_wav)
+                _dbg(f"  seg {seg_idx:03d}: in_precopied={_in_precopied}  wav_valid={_wav_valid}")
+                if _in_precopied and _wav_valid:
+                    # コピー済み → seg_durations だけ更新してスキップ
+                    self.seg_durations[seg_idx] = get_wav_duration(final_wav)
+                else:
+                    still_need_gen.append(seg_idx)
+
+            _dbg(f"still_need_gen={still_need_gen}")
+
+            # テストWAVを使えなかったセグメントのみVoicePeakで再生成
             # 変更セグメントの古いWAVを事前に削除する。
-            # VoicePeakはOSやバージョンによって既存の有効WAVを上書きせず
-            # 終了コード0で無視することがある。
-            for _si in changed_indices:
+            for _si in still_need_gen:
                 _old_wav = self.work_dir / f"seg_{_si:03d}.wav"
                 if _old_wav.exists():
                     try:
@@ -2302,7 +2507,7 @@ class PodcastReviewerApp:
                     except Exception:
                         pass
 
-            for ci, seg_idx in enumerate(need_gen):
+            for ci, seg_idx in enumerate(still_need_gen):
                 # ★ 中止ボタンが押されたらここで抜ける
                 if self._init_cancel.is_set():
                     self.root.after(0, lambda: self.status_var.set(
@@ -2314,17 +2519,19 @@ class PodcastReviewerApp:
                 seg = self.segments[seg_idx]
                 narrator = NARRATOR_F if seg["speaker"] == "F" else NARRATOR_M
                 wav_path = self.work_dir / f"seg_{seg_idx:03d}.wav"
-                self.root.after(0, lambda v=ci+1, t=total_gen: self.status_var.set(
+                self.root.after(0, lambda v=ci+1, t=len(still_need_gen): self.status_var.set(
                     f"直接修正を適用中... {v}/{t}"))
                 if generate_wav(seg["text"], narrator, wav_path,
                                 speaker=seg["speaker"],
-                                emotion=seg.get("emotion", "N")):
+                                emotion=seg.get("emotion", "N"),
+                                force=True):  # 変更セグメント: 既存WAVを強制削除して確実に再生成
                     self.seg_durations[seg_idx] = get_wav_duration(wav_path)
 
             # ── 変更セグメントの再試行（失敗したものだけ） ──
+            # _is_valid_wav で判定する（.exists() だと古い無効WAVが残っていても通過してしまう）
             changed_missing = [
                 i for i in changed_indices
-                if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+                if not _is_valid_wav(self.work_dir / f"seg_{i:03d}.wav")
             ]
             if changed_missing:
                 self.root.after(0, lambda n=len(changed_missing): self.status_var.set(
@@ -2342,15 +2549,19 @@ class PodcastReviewerApp:
                     wav_path = self.work_dir / f"seg_{i:03d}.wav"
                     if generate_wav(seg["text"], narrator, wav_path,
                                     speaker=seg["speaker"],
-                                    emotion=seg.get("emotion", "N")):
+                                    emotion=seg.get("emotion", "N"),
+                                    force=True):  # 再試行も force=True で確実に再生成
                         self.seg_durations[i] = get_wav_duration(wav_path)
 
             # 変更セグメントがまだ揃っていない場合 → MP3も原稿も上書きしない
+            # _is_valid_wav で判定（古い無効WAVが存在していても "生成済み" とみなさない）
             changed_missing_final = [
                 i for i in changed_indices
-                if not (self.work_dir / f"seg_{i:03d}.wav").exists()
+                if not _is_valid_wav(self.work_dir / f"seg_{i:03d}.wav")
             ]
+            _dbg(f"changed_indices={changed_indices}  changed_missing_final={changed_missing_final}")
             if changed_missing_final:
+                _dbg(f"ABORT: changed_missing_final non-empty → no MP3 rebuild")
                 self.root.after(0, lambda n=len(changed_missing_final): messagebox.showwarning(
                     "変更セグメント音声化失敗 — MP3は更新しません",
                     f"{n} セグメントの音声生成に失敗しました。\n"
@@ -2359,13 +2570,42 @@ class PodcastReviewerApp:
                 return
 
             # ── 未初期化セグメントの確認 ──
-            # 変更セグメントは揃っている。変更なし・init未完了のセグメントが残っている場合は
-            # 原稿だけ保存してバックグラウンドinitに任せる（MP3はinit完了後に再構築）。
+            # 変更セグメントは揃っている。変更なし・init未完了のセグメントが残っている場合を確認。
             unchanged_missing = [
                 i for i in range(len(self.segments))
                 if i not in changed_set
                 and not (self.work_dir / f"seg_{i:03d}.wav").exists()
             ]
+            _dbg(f"unchanged_missing={unchanged_missing[:10]}{'...' if len(unchanged_missing)>10 else ''} (total {len(unchanged_missing)})")
+
+            # ★ _podcast_work から未生成WAVを高速コピー（VoicePeak不要）
+            # content_generator.py が生成した元WAVが残っている場合、
+            # VoicePeakで再生成する代わりにコピーするだけで済む（数秒で完了）。
+            # 変更セグメントはpre-copy済みなので unchanged_missing に含まれない。
+            if unchanged_missing:
+                _podcast_work_dir = (self.selected_folder / "_podcast_work"
+                                     if self.selected_folder else None)
+                if _podcast_work_dir and _podcast_work_dir.exists():
+                    _still_missing_after_pw = []
+                    _pw_copied = 0
+                    for _umi in unchanged_missing:
+                        _pw_src = _podcast_work_dir / f"seg_{_umi:03d}.wav"
+                        _pw_dst = self.work_dir / f"seg_{_umi:03d}.wav"
+                        if _is_valid_wav(_pw_src):
+                            try:
+                                shutil.copy2(str(_pw_src), str(_pw_dst))
+                                self.seg_durations[_umi] = get_wav_duration(_pw_dst)
+                                _pw_copied += 1
+                            except Exception as _pwce:
+                                _dbg(f"  _podcast_work copy FAILED seg_{_umi:03d}: {_pwce}")
+                                _still_missing_after_pw.append(_umi)
+                        else:
+                            _still_missing_after_pw.append(_umi)
+                    unchanged_missing = _still_missing_after_pw
+                    _dbg(f"_podcast_work copy: {_pw_copied} copied, still_missing={len(unchanged_missing)}")
+                    if _pw_copied > 0:
+                        self.root.after(0, lambda n=_pw_copied: self.status_var.set(
+                            f"元WAVをコピー中... {n}件完了"))
 
             # 原稿ファイル保存（変更セグメントのハッシュを更新）
             updated = "\n".join(
@@ -2393,40 +2633,50 @@ class PodcastReviewerApp:
                                     key.encode("utf-8")).hexdigest()
                         seg_hash_file.write_text(
                             _json.dumps(cur_hashes), encoding="utf-8")
-                    except Exception:
-                        pass
+                        _dbg(f"hash file updated for indices {changed_indices}")
+                    except Exception as _he:
+                        _dbg(f"hash update FAILED: {_he}")
                     try:
                         (self.work_dir / "_script_hash.txt").unlink(missing_ok=True)
                     except Exception:
                         pass
 
             if unchanged_missing:
-                # 変更部分は正しい。init未完了WAVが残っているのでinitに再構築を任せる。
-                # MP3はinitが全WAVを揃えた後に自動再構築される。
-                # seg_durationsを0にしておくことで _restart_init_if_needed が確実に発火する。
+                # 変更部分（テスト済みWAV）は正しい。
+                # 未初期化のWAVが残っているため、今すぐ strict=True では MP3 を組めない。
+                # → strict=False で組むと欠損セグメントが抜けて MP3 が短くなる危険があるため NG。
+                # → init を再起動して全WAVを揃えてから再構築する（安全）。
+                # 完了時には _notify_direct_apply_done が修正箇所から自動再生する。
+                _dbg(f"unchanged_missing={len(unchanged_missing)} → handing rebuild to init (safe path)")
                 for i in unchanged_missing:
                     if i < len(self.seg_durations):
                         self.seg_durations[i] = 0.0
+                # init 完了後の自動再生位置を記録（_initialize_wavs がMP3再構築後に参照）
+                self._pending_mp3_notify_pos = self._direct_edit_start_pos
                 self.root.after(0, self._finish_direct_edit_mode)
                 self.root.after(0, lambda n=len(unchanged_missing), tc=total_gen: self.status_var.set(
                     f"原稿を保存しました（{tc}セグメント修正）。"
-                    f"残り{n}セグメントの音声を再生成中（完了後にMP3が更新されます）"))
+                    f"残り{n}セグメントの音声を生成中... 完了後にMP3を更新して自動再生します"))
                 self._init_cancel.clear()
                 clear_cancel_synthesis()
                 self.root.after(300, self._restart_init_if_needed)
                 return
 
             # ── 全WAV揃っている → MP3再構築（strictモード）──
+            _dbg("all WAVs present → strict MP3 rebuild")
             self.root.after(0, lambda: self.status_var.set("MP3を再構築中..."))
             mp3_ok = combine_wavs_to_mp3(
                 self.work_dir, self.mp3_path, len(self.segments))
+            _dbg(f"MP3 rebuild result: {mp3_ok}")
             if not mp3_ok:
+                _dbg("ABORT: combine_wavs_to_mp3 returned False")
                 self.root.after(0, lambda: messagebox.showerror(
                     "MP3再構築失敗",
                     "MP3の再構築に失敗しました。既存のMP3と原稿はそのまま残しています。\n"
                     "もう一度「修正の適用」を押してください。"))
                 return
 
+            _dbg("SUCCESS: MP3 rebuilt, scheduling resume and restart")
             self.root.after(0, self._finish_direct_edit_mode)
             self.root.after(0, lambda tc=total_gen: self.status_var.set(
                 f"直接修正を適用しました（{tc}セグメント再生成）"))
@@ -2436,6 +2686,7 @@ class PodcastReviewerApp:
             self.root.after(700, self._restart_init_if_needed)
 
         except Exception as e:
+            _dbg(f"EXCEPTION: {e}")
             self.root.after(0, lambda err=str(e): self.status_var.set(
                 f"直接修正エラー: {err[:80]}"))
             self.root.after(0, self._finish_direct_edit_mode)
@@ -2443,8 +2694,28 @@ class PodcastReviewerApp:
             # 取得したロックを必ず解放する（_wav_lock は修正入力等が待っている可能性あり）
             try:
                 self._wav_lock.release()
+                _dbg("lock released")
             except Exception:
                 pass
+            _dbg("=== _do_direct_apply END ===")
+
+    def _notify_direct_apply_done(self, resume_pos: float):
+        """unchanged_missing パスで init に MP3 再構築を依頼した後、
+        init が完了して MP3 が更新されたことをユーザーに通知し、修正箇所から再生する。"""
+        if not self.mp3_path or not self.mp3_path.exists():
+            return
+        # MP3 の総時間を再取得してシークバーを更新
+        new_duration = get_audio_duration(self.mp3_path)
+        if new_duration > 0:
+            self.total_duration = new_duration
+            self.seek_bar.config(to=new_duration)
+            self.total_time_label.config(text=format_time(new_duration))
+        # 修正箇所から再生を開始してユーザーが発音を確認できるようにする
+        resume_pos = min(resume_pos, self.total_duration)
+        self._play_from(resume_pos)
+        self.status_var.set(
+            f"✓ 音声生成が完了し、MP3を更新しました。"
+            f"{format_time(resume_pos)} から再生中 — 発音を確認してください")
 
     def _cancel_direct_edit(self):
         """直接修正を中止 — テキストを元に戻し中断位置から再生再開"""

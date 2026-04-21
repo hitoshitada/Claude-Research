@@ -66,3 +66,9 @@ _test_sentence_pause.py
 # WPメディアライブラリキャッシュ（大量画像）
 画像ファイル/
 test_*.py
+
+# テスト生成画像
+tests/*.png
+tests/*.jpg
+wp_uploader_backup.py
+ポッドキャスト修正ログ.txt

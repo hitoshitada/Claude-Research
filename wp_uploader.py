@@ -65,8 +65,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 IMAGE_MODEL = "imagen-4.0-generate-001"
 
 # 画像サイズ
-TARGET_WIDTH = 1920
-TARGET_HEIGHT = 1080
+# 1280×720（720p）: 1920×1080比でピクセル数55%削減・ファイル容量大幅削減
+# WordPressサムネイル(1024×576)より大きく、ブログ表示での視覚的劣化なし
+TARGET_WIDTH = 1280
+TARGET_HEIGHT = 720
 
 # =====================================================================
 # カテゴリーマッピング（フォルダ名のキーワード → WPカテゴリー名）
@@ -665,7 +667,7 @@ def generate_image_with_gemini(
 ) -> Path:
     """Imagen 4.0 APIで記事に関連するアイキャッチ画像を生成する
 
-    生成後、1920×1080にリサイズして保存する。
+    生成後、1280×720にリサイズして保存する。
     """
     client = genai.Client(api_key=api_key)
 
@@ -713,7 +715,7 @@ def generate_image_with_gemini(
     if not response.generated_images:
         raise Exception("画像が生成されませんでした（安全フィルターの可能性あり）")
 
-    # 生成画像を取得 → PILで1920×1080にリサイズして保存
+    # 生成画像を取得 → PILで1280×720にリサイズして保存
     gen_img = response.generated_images[0].image
     pil_img = PILImage.open(io.BytesIO(gen_img.image_bytes))
     pil_img = pil_img.resize((TARGET_WIDTH, TARGET_HEIGHT), PILImage.LANCZOS)
@@ -952,7 +954,7 @@ def generate_image_with_chart(
 
     1. Imagen で右下スペースを確保した背景を生成
     2. chart_data から matplotlib で新グラフを描画
-    3. 背景の右下にグラフを合成して 1920×1080 で保存
+    3. 背景の右下にグラフを合成して 1280×720 で保存
     失敗時は通常の generate_image_with_gemini にフォールバック。
     """
     client = genai.Client(api_key=api_key)
@@ -1520,9 +1522,9 @@ class WPUploaderApp(tk.Tk):
             now = datetime.now()
             date_str = f"{now.year}年{now.month}月{now.day}日"
 
-        # 投稿タイトル: "{技術カテゴリー}{YYYY}年{M}月{D}日号"
-        # 例: 全固体電池2026年4月16日号
-        post_title = f"{self.detected_category}{date_str}号"
+        # 投稿タイトル: "{技術カテゴリー} ウィークリーレポート {YYYY}年{M}月{D}日号"
+        # 例: 全固体電池 ウィークリーレポート 2026年4月16日号
+        post_title = f"{self.detected_category} ウィークリーレポート {date_str}号"
         self._log_safe(f"投稿タイトル: {post_title}")
 
         # --- 2. 各ファイルをWPメディアにアップロードしてブロックを生成 ---
