@@ -207,9 +207,11 @@ M[N] 40〜55% / M[S] 20〜30% / M[H] 5〜10% / M[Q] 5%程度
 
 ## 原稿の構成
 1. オープニング（F[N]またはF[H]で挨拶、今週のテーマ紹介）
+   - 冒頭のスージーの発言には必ず「{番組タイトル}の時間です」を含めること
 2. 各記事のトピック解説（記事1件につき8〜12行のやりとり）
    - F[Q]でスージーが質問 → M[N]/M[S]でトロイが解説 → F[N]/F[S]でスージーが受ける
 3. クロージング（今週のまとめ、来週への展望）
+   - 締めのスージーの発言には必ず「{番組タイトル}の時間でした」を含めること
 
 ## 分量
 - 記事1件につき会話8〜12行（約400〜600字）
@@ -282,6 +284,20 @@ def load_podcast_prompt(topic_name: str) -> str:
         if prompt_file.exists()
         else DEFAULT_PODCAST_PROMPT
     )
+
+    # ── 番組タイトルフレーズを先頭に注入（最重要ルールとして最初に提示）──
+    # 冒頭・締めのフレーズをカテゴリー名で統一する
+    program_title = f"{topic_name}テクノロジー最前線"
+    title_rule = (
+        f"## 【最重要】番組タイトルフレーズ（必ず遵守すること）\n"
+        f"この番組のタイトルは「{program_title}」です。\n"
+        f"- 番組の冒頭（オープニング）では必ず「{program_title}の時間です」というフレーズを使うこと\n"
+        f"- 番組の締め（クロージング）では必ず「{program_title}の時間でした」というフレーズを使うこと\n"
+        f"- 「へようこそ」「番組です」「お送りします」など他のバリエーションは絶対に使わないこと\n"
+    )
+    base_prompt = title_rule + "\n" + base_prompt
+    # DEFAULT_PODCAST_PROMPT 内の {番組タイトル} プレースホルダーを実際の値に置換
+    base_prompt = base_prompt.replace("{番組タイトル}", program_title)
 
     # 共通ルールを末尾に追加
     common_rules_file = BASE_DIR / "調査内容ファイル" / "共通_podcast_rules.txt"
