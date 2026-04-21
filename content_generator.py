@@ -1205,7 +1205,6 @@ class ContentGeneratorApp:
                         articles_data_path.read_text(encoding="utf-8"))
                     self._log(f"articles_data.json 読込完了: {articles_data['total_articles']}件")
                 else:
-                    self._log("articles_data.json が見つかりません。HTMLから構築します...")
                     articles_data = self._build_articles_data_dict()
 
                 # Gemini クライアント生成
