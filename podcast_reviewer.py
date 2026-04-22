@@ -476,6 +476,40 @@ def format_time(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _extract_changed_phrase(old_text: str, new_text: str) -> tuple[str, str]:
+    """2つのテキストの差分（変更された単語・フレーズ）のみを抽出する。
+
+    共通の接頭辞・接尾辞を除いた差分部分を返す。
+    例:
+      「最大10分の1に短縮」→「最大じゅうぶんのいちに短縮」
+      → ("10分の1", "じゅうぶんのいち") を返す
+    差分が空（抽出できない）場合はテキスト全体を返す。
+    """
+    # 共通の接頭辞の長さ
+    prefix_len = 0
+    while (prefix_len < len(old_text)
+           and prefix_len < len(new_text)
+           and old_text[prefix_len] == new_text[prefix_len]):
+        prefix_len += 1
+
+    # 共通の接尾辞の長さ（接頭辞と重複しないよう上限を設定）
+    suffix_len = 0
+    while (suffix_len < len(old_text) - prefix_len
+           and suffix_len < len(new_text) - prefix_len
+           and old_text[len(old_text) - 1 - suffix_len]
+               == new_text[len(new_text) - 1 - suffix_len]):
+        suffix_len += 1
+
+    old_changed = old_text[prefix_len: len(old_text) - suffix_len].strip()
+    new_changed = new_text[prefix_len: len(new_text) - suffix_len].strip()
+
+    # 差分が空なら全体を返す（純粋な挿入・削除など）
+    if not old_changed or not new_changed:
+        return old_text.strip(), new_text.strip()
+
+    return old_changed, new_changed
+
+
 def append_correction_log(topic_name: str, old_text: str, new_text: str):
     """修正ログにエントリを追加"""
     # ファイルが存在しなければヘッダーを作成
@@ -2456,13 +2490,17 @@ class PodcastReviewerApp:
 
             # ── 全体修正ログへの記録 ──
             # 変更されたセグメントのうちテキストが異なるものを修正ログに追記する。
+            # 文章全体ではなく変更された単語・フレーズ部分のみを抽出して記録する。
             # これにより次回の原稿生成時に Gemini が同じ誤りを繰り返さなくなる。
             for _i in changed_indices:
                 if _i < len(old_segments) and _i < len(new_segments):
                     _old_txt = old_segments[_i].get("text", "")
                     _new_txt = new_segments[_i].get("text", "")
                     if _old_txt != _new_txt:
-                        append_correction_log(self.topic_name, _old_txt, _new_txt)
+                        _old_phrase, _new_phrase = _extract_changed_phrase(
+                            _old_txt, _new_txt)
+                        append_correction_log(
+                            self.topic_name, _old_phrase, _new_phrase)
 
             # seg_durations をサイズ調整
             while len(self.seg_durations) < len(self.segments):
