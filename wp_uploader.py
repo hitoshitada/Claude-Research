@@ -609,6 +609,49 @@ class WordPressClient:
             pass
         return None
 
+    def get_eyecatch_from_prev_weekly_report(
+        self, category_id: int, log_func=None
+    ) -> int | None:
+        """同カテゴリーの直近WeeklyReport投稿からアイキャッチ画像IDを取得する。
+
+        WP REST API でカテゴリー内の最新投稿を取得し、
+        「ウィークリーレポート」を含む投稿の featured_media を返す。
+        これにより同カテゴリーのWeeklyReport・ポッドキャスト記事は
+        毎回同じアイキャッチ画像を使い続けることができる。
+        前回投稿が存在しない場合（初回）は None を返す。
+        """
+        def _log(msg):
+            if log_func:
+                log_func(msg)
+        try:
+            resp = requests.get(
+                f"{self.api_url}/posts",
+                auth=self.auth,
+                params={
+                    "categories": category_id,
+                    "search": "ウィークリーレポート",
+                    "per_page": 5,
+                    "orderby": "date",
+                    "order": "desc",
+                    "status": "publish",
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                _log(f"  ⚠ 前回投稿の検索失敗: HTTP {resp.status_code}")
+                return None
+            posts = resp.json()
+            for post in posts:
+                fm = post.get("featured_media", 0)
+                if fm:
+                    prev_title = post.get("title", {}).get("rendered", "")
+                    _log(f"  前回投稿「{prev_title}」からアイキャッチを取得 (ID: {fm})")
+                    return fm
+            _log("  前回のWeeklyReport投稿にアイキャッチが未設定です")
+        except Exception as e:
+            _log(f"  ⚠ 前回投稿取得エラー: {e}")
+        return None
+
     def create_post(
         self,
         title: str,
@@ -1651,20 +1694,35 @@ class WPUploaderApp(tk.Tk):
         except Exception as e:
             self._log_safe(f"  ⚠ サブカテゴリー取得失敗: {e}")
 
-        # --- 4. アイキャッチ画像をメディアライブラリから検索 ---
+        # --- 4. アイキャッチ画像を取得 ---
+        # 優先順位:
+        #   1) 同カテゴリーの直近WeeklyReport投稿に設定済みのアイキャッチを再利用
+        #      → カテゴリー内では毎回同じアイキャッチ画像を使い続ける
+        #   2) 初回など前回投稿がない場合はメディアライブラリをキーワード検索
         eyecatch_id: int | None = None
-        for kw in [
-            f"{self.detected_category}ウィークリーレポート",
-            f"{self.detected_category}WeeklyReport",
-            "ウィークリーレポート",
-        ]:
-            try:
-                eyecatch_id = self.wp_client.search_media_by_keyword(kw)
-            except Exception:
-                pass
-            if eyecatch_id:
-                self._log_safe(f"  アイキャッチ画像 ID: {eyecatch_id}")
-                break
+
+        # ① 前回の同カテゴリーWeeklyReport投稿からアイキャッチを継承
+        if parent_cat_id:
+            eyecatch_id = self.wp_client.get_eyecatch_from_prev_weekly_report(
+                parent_cat_id, log_func=self._log_safe
+            )
+
+        # ② 前回投稿が存在しない場合（初回）→ メディアライブラリをキーワード検索
+        if not eyecatch_id:
+            self._log_safe("  前回投稿なし（初回）→ メディアライブラリをキーワード検索")
+            for kw in [
+                f"{self.detected_category}ウィークリーレポート",
+                f"{self.detected_category}WeeklyReport",
+                "ウィークリーレポート",
+            ]:
+                try:
+                    eyecatch_id = self.wp_client.search_media_by_keyword(kw)
+                except Exception:
+                    pass
+                if eyecatch_id:
+                    self._log_safe(f"  アイキャッチ画像 ID: {eyecatch_id}")
+                    break
+
         if not eyecatch_id:
             self._log_safe(
                 "  ⚠ アイキャッチ画像が見つかりませんでした（なしで続行）")
